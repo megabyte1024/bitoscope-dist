@@ -19,9 +19,7 @@ Set-StrictMode -Version 3
 . (Join-Path $PSScriptRoot 'msi.ps1')
 . (Join-Path $PSScriptRoot 'iexpress.ps1')
 
-$ProductName = 'Bitoscope'
 $Manufacturer = 'Bitoscope project'
-$UpgradeCode = '{140CE35C-0B96-4A07-83C9-03B4E1B59042}'
 $ProjectUrl = 'https://github.com/megabyte1024/bitoscope'
 $Repos = [ordered]@{ main = 'bitoscope'; dla = 'bitoscope-fnirsi-dla'; bridge = 'bitoscope-sigrok-bridge' }
 
@@ -93,7 +91,7 @@ function Invoke-Build {
     Invoke-CMakeProject 'main' @("-DCMAKE_INSTALL_PREFIX=$main\deps") @('-DBITOSCOPE_GUI_TEST_HOOK=OFF')
 }
 
-function Get-StageFolder($Data) { return Join-Path $Work "stage\bitoscope-$($Data.version)" }
+function Get-StageFolder($Data) { return Join-Path $Work "stage\$($Naming.Base)" }
 
 function Copy-License([string]$Source, [string]$Licenses, [string]$Name) {
     if (-not (Test-Path -LiteralPath $Source)) { throw "licence file $Source is missing" }
@@ -103,11 +101,11 @@ function Copy-License([string]$Source, [string]$Licenses, [string]$Name) {
 function Write-Sources($Data, [string]$Licenses, [string]$Vcpkg) {
     $bridge = Get-Source 'bridge'
     $lines = @(
-        "Bitoscope $($Data.version) for Windows x64 is built from these sources:",
+        "$($Naming.Name) $($Data.version) for Windows x64 is built from these sources:",
         '')
     foreach ($key in $Repos.Keys) {
         $repo = Get-ManifestRepo $Data $Repos[$key]
-        $lines += "$($repo.name): $($repo.url), tag $($repo.tag), commit $($repo.commit)"
+        $lines += "$($repo.name): $($repo.url), $(Get-RefText $repo), commit $($repo.commit)"
     }
     $libsigrok = Get-GitOutput "$bridge\third_party\libsigrok" @('rev-parse', 'HEAD')
     $vcpkgCommit = Get-GitOutput $Vcpkg @('rev-parse', 'HEAD')
@@ -175,11 +173,11 @@ function Invoke-Stage($Data) {
 
 function Get-Product($Data) {
     return [pscustomobject]@{
-        Name = $ProductName
-        Folder = $ProductName
+        Name = $Naming.Name
+        Folder = $Naming.Name
         Version = $Data.version
         Manufacturer = $Manufacturer
-        UpgradeCode = $UpgradeCode
+        UpgradeCode = $Naming.UpgradeCode
         ProductCode = '{' + [guid]::NewGuid().ToString().ToUpperInvariant() + '}'
         PackageCode = '{' + [guid]::NewGuid().ToString().ToUpperInvariant() + '}'
         Url = $ProjectUrl
@@ -189,7 +187,7 @@ function Get-Product($Data) {
 }
 
 function Get-PackagePath($Data, [string]$Format) {
-    $base = Join-Path $Out "bitoscope-$($Data.version)-windows-x64"
+    $base = Join-Path $Out "$($Naming.Base)-windows-x64"
     switch ($Format) {
         'zip' { return "$base.zip" }
         'msi' { return "$base.msi" }
@@ -217,7 +215,7 @@ function Invoke-Package($Data) {
         $exe = Get-PackagePath $Data 'exe'
         Write-Host "==> Setup program $exe"
         New-IExpressPackage -MsiPath $msi -OutputPath $exe -WorkFolder (Join-Path $Work 'iexpress') `
-            -FriendlyName "$ProductName $($Data.version) Setup"
+            -FriendlyName "$($Naming.Name) $($Data.version) Setup"
         if ('msi' -notin $Formats) { Remove-Item -LiteralPath $msi -Force }
     }
     Get-ChildItem -LiteralPath $Out -File | ForEach-Object { Write-Host ("    {0}  {1:N0} bytes" -f $_.Name, $_.Length) }
@@ -227,7 +225,7 @@ function Test-Installed([string]$Stage, [string]$Folder, [string]$Checker, [stri
     $expected = @(Get-ChildItem -LiteralPath $Stage -Recurse -File).Count
     $found = @(Get-ChildItem -LiteralPath $Folder -Recurse -File -ErrorAction SilentlyContinue).Count
     if ($found -ne $expected) { throw "$What installed $found files into $Folder, distribution has $expected" }
-    $shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\$ProductName.lnk"
+    $shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\$($Naming.Name).lnk"
     if (-not (Test-Path -LiteralPath $shortcut)) { throw "$What made no Start menu entry $shortcut" }
     Test-Distribution $Folder $Checker $Dumpbin (Join-Path $Work 'home')
 }
@@ -245,12 +243,12 @@ function Invoke-InstallTest($Data) {
     $stage = Get-StageFolder $Data
     $checker = Join-Path $Work 'checker\bitoscope_cli.exe'
     $vs = Get-VisualStudio
-    $folder = Join-Path $env:ProgramFiles $ProductName
+    $folder = Join-Path $env:ProgramFiles $Naming.Name
     $logs = Join-Path $Work 'logs'
     New-Item -ItemType Directory -Force -Path $logs | Out-Null
     $msi = Get-PackagePath $Data 'msi'
     $exe = Get-PackagePath $Data 'exe'
-    if (Test-Path -LiteralPath $folder) { throw "$folder exists already: uninstall $ProductName first" }
+    if (Test-Path -LiteralPath $folder) { throw "$folder exists already: uninstall $($Naming.Name) first" }
 
     if (Test-Path -LiteralPath $msi) {
         Write-Host "==> Install $msi"
@@ -265,10 +263,10 @@ function Invoke-InstallTest($Data) {
         $process = Start-Process -FilePath $exe -ArgumentList '/Q' -Wait -PassThru
         if ($process.ExitCode -ne 0) { throw "setup program exited $($process.ExitCode)" }
         Test-Installed $stage $folder $checker $vs.Dumpbin 'setup program'
-        Write-Host "==> Uninstall $ProductName installed by setup program"
+        Write-Host "==> Uninstall $($Naming.Name) installed by setup program"
         $installed = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
-            Where-Object { $_.GetValue('DisplayName') -eq $ProductName } | ForEach-Object { $_.PSChildName })
-        if ($installed.Count -ne 1) { throw "expected one installed $ProductName, found $($installed.Count)" }
+            Where-Object { $_.GetValue('DisplayName') -eq $Naming.Name } | ForEach-Object { $_.PSChildName })
+        if ($installed.Count -ne 1) { throw "expected one installed $($Naming.Name), found $($installed.Count)" }
         Invoke-Msiexec @('/x', $installed[0], '/qn', '/l*v', (Join-Path $logs 'exe-uninstall.log')) 'uninstall after setup program'
         if (Test-Path -LiteralPath $folder) { throw "uninstall left $folder" }
     }
@@ -280,6 +278,7 @@ if ($Manifest -eq '') { $Manifest = Join-Path $RepoRoot 'manifest.json' }
 if ($Work -eq '') { $Work = Join-Path $RepoRoot 'work\windows' }
 if ($Out -eq '') { $Out = Join-Path $RepoRoot 'out' }
 $data = Read-Manifest $Manifest
+$Naming = Get-Naming $data
 $Work = [System.IO.Path]::GetFullPath($Work)
 $Out = [System.IO.Path]::GetFullPath($Out)
 switch ($Target) {

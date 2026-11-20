@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -36,6 +37,42 @@ class ManifestTest(unittest.TestCase):
         data["repos"] = [repo for repo in data["repos"] if repo["name"] != "bitoscope-sigrok-bridge"]
         with self.assertRaisesRegex(build.DistError, "bitoscope-sigrok-bridge once"):
             build.parse_manifest(json.dumps(data))
+
+
+class NightlyTest(unittest.TestCase):
+    def test_version_is_release_line_with_year_and_day(self):
+        self.assertEqual(build.nightly_version("0.4.0", date(2026, 11, 20)), "0.4.26324")
+        self.assertEqual(build.nightly_version("0.4.0", date(2027, 1, 1)), "0.4.27001")
+
+    def test_default_branch_head_is_read_from_ls_remote(self):
+        output = f"ref: refs/heads/main\tHEAD\n{'a' * 40}\tHEAD\n"
+        self.assertEqual(build.parse_head(output), ("main", "a" * 40))
+
+    def test_ls_remote_without_head_is_refused(self):
+        with self.assertRaisesRegex(build.DistError, "no default branch"):
+            build.parse_head("")
+
+    def test_nightly_manifest_names_branch_heads(self):
+        manifest = build.parse_manifest(MANIFEST)
+        heads = {repo.url: ("main", f"{index}" * 40) for index, repo in enumerate(manifest.repos.values(), 1)}
+        data = build.nightly_manifest(manifest, lambda url: heads[url], date(2026, 11, 20))
+        nightly = build.parse_manifest(json.dumps(data))
+        self.assertTrue(nightly.nightly)
+        self.assertEqual(nightly.version, "0.4.26324")
+        self.assertEqual([(repo.branch, repo.tag, repo.commit) for repo in nightly.repos.values()],
+                         [("main", None, f"{index}" * 40) for index in range(1, 4)])
+
+    def test_manifest_entry_needs_tag_or_branch(self):
+        data = json.loads(MANIFEST)
+        del data["repos"][1]["tag"]
+        with self.assertRaisesRegex(build.DistError, "bitoscope-fnirsi-dla needs url and tag or branch"):
+            build.parse_manifest(json.dumps(data))
+
+    def test_nightly_and_release_have_own_file_names(self):
+        release = build.parse_manifest(MANIFEST)
+        self.assertEqual(build.base_name(release), f"bitoscope-{release.version}")
+        nightly = build.Manifest("0.4.26324", release.repos, True)
+        self.assertEqual(build.base_name(nightly), "bitoscope-nightly")
 
 
 class LibraryTest(unittest.TestCase):

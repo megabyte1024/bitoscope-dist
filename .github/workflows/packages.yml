@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: MIT
+
+name: Packages
+
+on:
+  workflow_call:
+    inputs:
+      nightly:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: powershell
+    env:
+      MANIFEST: ${{ inputs.nightly && 'nightly-manifest.json' || 'manifest.json' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        if: inputs.nightly
+        with:
+          name: nightly-manifest
+
+      - name: Test packaging scripts
+        run: .\windows\test.ps1
+
+      - name: Install libusb with vcpkg
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libusb:x64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install MSYS2 packages for libsigrok
+        run: |
+          C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --needed --noconfirm base-devel mingw-w64-ucrt-x86_64-{gcc,autotools,pkgconf,tools-git,ntldd}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build zip, msi and exe
+        run: .\windows\build.ps1 -Target all -Manifest $env:MANIFEST -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT
+
+      - name: Install and uninstall msi and exe
+        run: .\windows\build.ps1 -Target install-test -Manifest $env:MANIFEST -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-packages
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: windows-logs
+          path: work/windows/logs
+          retention-days: 7
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      MANIFEST: ${{ inputs.nightly && 'nightly-manifest.json' || 'manifest.json' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        if: inputs.nightly
+        with:
+          name: nightly-manifest
+
+      - name: Test packaging script
+        run: python3 linux/test_build.py
+
+      - name: Install build packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git pkg-config curl autoconf automake libtool \
+            libvulkan-dev libdbus-1-dev libwayland-dev libwayland-bin libxkbcommon-dev libx11-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libglib2.0-dev libzip-dev libusb-1.0-0-dev
+
+      - name: Build AppImage
+        run: python3 linux/build.py all --manifest "$MANIFEST"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-packages
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: linux-logs
+          path: work/linux/logs
+          retention-days: 7

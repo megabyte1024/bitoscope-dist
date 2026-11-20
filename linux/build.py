@@ -21,9 +21,10 @@ import tarfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 
-TARGETS = ("all", "fetch", "build", "stage", "package")
+TARGETS = ("all", "fetch", "build", "stage", "package", "nightly-manifest")
 
 REPOS = {"main": "bitoscope", "dla": "bitoscope-fnirsi-dla", "bridge": "bitoscope-sigrok-bridge"}
 
@@ -92,14 +93,20 @@ class DistError(Exception):
 class Repo:
     name: str
     url: str
-    tag: str
+    tag: str | None
     commit: str
+    branch: str | None = None
+
+    @property
+    def ref_text(self) -> str:
+        return f"tag {self.tag}" if self.tag else f"branch {self.branch}"
 
 
 @dataclass(frozen=True)
 class Manifest:
     version: str
     repos: dict[str, Repo]
+    nightly: bool = False
 
 
 def parse_manifest(text: str) -> Manifest:
@@ -115,10 +122,42 @@ def parse_manifest(text: str) -> Manifest:
         entry = found[0]
         if not re.fullmatch(r"[0-9a-f]{40}", str(entry.get("commit", ""))):
             raise DistError(f"manifest: commit of {name} is not 40 hex digits")
-        if not entry.get("url") or not entry.get("tag"):
-            raise DistError(f"manifest: {name} needs url and tag")
-        repos[name] = Repo(name, entry["url"], entry["tag"], entry["commit"])
-    return Manifest(version, repos)
+        if not entry.get("url") or not (entry.get("tag") or entry.get("branch")):
+            raise DistError(f"manifest: {name} needs url and tag or branch")
+        repos[name] = Repo(name, entry["url"], entry.get("tag"), entry["commit"], entry.get("branch"))
+    return Manifest(version, repos, bool(data.get("nightly", False)))
+
+
+def base_name(manifest: Manifest) -> str:
+    return "bitoscope-nightly" if manifest.nightly else f"bitoscope-{manifest.version}"
+
+
+def nightly_version(release_version: str, day: date) -> str:
+    major, minor, _patch = release_version.split(".")
+    return f"{major}.{minor}.{day.year % 100:02d}{day.timetuple().tm_yday:03d}"
+
+
+def parse_head(ls_remote_output: str) -> tuple[str, str]:
+    branch = re.search(r"^ref: refs/heads/(\S+)\tHEAD$", ls_remote_output, re.MULTILINE)
+    commit = re.search(r"^([0-9a-f]{40})\tHEAD$", ls_remote_output, re.MULTILINE)
+    if branch is None or commit is None:
+        raise DistError(f"no default branch in git ls-remote output:\n{ls_remote_output}")
+    return branch.group(1), commit.group(1)
+
+
+def remote_head(url: str) -> tuple[str, str]:
+    result = subprocess.run(["git", "ls-remote", "--symref", url, "HEAD"], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise DistError(f"git ls-remote {url} failed:\n{result.stderr.strip()}")
+    return parse_head(result.stdout)
+
+
+def nightly_manifest(manifest: Manifest, head_of, day: date) -> dict:
+    repos = []
+    for repo in manifest.repos.values():
+        branch, commit = head_of(repo.url)
+        repos.append({"name": repo.name, "url": repo.url, "branch": branch, "commit": commit})
+    return {"version": nightly_version(manifest.version, day), "nightly": True, "repos": repos}
 
 
 @dataclass
@@ -166,13 +205,18 @@ def sync_repo(repo: Repo, folder: Path, steps: Steps) -> None:
         remove_tree(folder)
     folder.mkdir(parents=True)
     steps.run(f"Init {repo.name}", ["git", "init", "--quiet", str(folder)])
-    steps.run(f"Fetch {repo.name} {repo.tag}", ["git", "-C", str(folder), "fetch", "--quiet", "--depth", "1", repo.url,
-                                               f"+refs/tags/{repo.tag}:refs/tags/{repo.tag}"])
-    tagged = git_output(folder, "rev-parse", f"refs/tags/{repo.tag}^{{commit}}")
-    if tagged != repo.commit:
-        raise DistError(f"tag {repo.tag} of {repo.url} is commit {tagged}, manifest names {repo.commit}")
-    steps.run(f"Check out {repo.name}", ["git", "-C", str(folder), "checkout", "--quiet", "--detach",
-                                         f"refs/tags/{repo.tag}"])
+    if repo.tag:
+        steps.run(f"Fetch {repo.name} {repo.tag}", ["git", "-C", str(folder), "fetch", "--quiet", "--depth", "1",
+                                                   repo.url, f"+refs/tags/{repo.tag}:refs/tags/{repo.tag}"])
+        tagged = git_output(folder, "rev-parse", f"refs/tags/{repo.tag}^{{commit}}")
+        if tagged != repo.commit:
+            raise DistError(f"tag {repo.tag} of {repo.url} is commit {tagged}, manifest names {repo.commit}")
+        checkout = f"refs/tags/{repo.tag}"
+    else:
+        steps.run(f"Fetch {repo.name} {repo.branch} at {repo.commit[:12]}",
+                  ["git", "-C", str(folder), "fetch", "--quiet", "--depth", "1", repo.url, repo.commit])
+        checkout = "FETCH_HEAD"
+    steps.run(f"Check out {repo.name}", ["git", "-C", str(folder), "checkout", "--quiet", "--detach", checkout])
     steps.run(f"Submodules of {repo.name}", ["git", "-C", str(folder), "submodule", "update", "--init", "--recursive",
                                              "--depth", "1"])
 
@@ -341,7 +385,7 @@ class Distribution:
 
     @property
     def stage(self) -> Path:
-        return self.work / "stage" / f"bitoscope-{self.manifest.version}"
+        return self.work / "stage" / base_name(self.manifest)
 
     @property
     def checker(self) -> Path:
@@ -474,10 +518,11 @@ class Distribution:
 
         bridge = self.source("bridge")
         libsigrok = git_output(bridge / "third_party" / "libsigrok", "rev-parse", "HEAD")
-        lines = [f"Bitoscope {self.manifest.version} for Linux {ARCH} is built from these sources:", ""]
+        product = "Bitoscope Nightly" if self.manifest.nightly else "Bitoscope"
+        lines = [f"{product} {self.manifest.version} for Linux {ARCH} is built from these sources:", ""]
         for name in REPOS.values():
             repo = self.manifest.repos[name]
-            lines.append(f"{repo.name}: {repo.url}, tag {repo.tag}, commit {repo.commit}")
+            lines.append(f"{repo.name}: {repo.url}, {repo.ref_text}, commit {repo.commit}")
         lines += [f"libsigrok: https://github.com/sigrokproject/libsigrok.git, commit {libsigrok}",
                   "fx2lafw firmware: https://sigrok.org/download/binary/sigrok-firmware-fx2lafw/ (version named in "
                   "bitoscope-sigrok-bridge scripts/fetch_sigrok_firmware.sh)"]
@@ -547,7 +592,7 @@ class Distribution:
                      appdir / "bitoscope.svg")
         (appdir / ".DirIcon").symlink_to("bitoscope.svg")
         self.out.mkdir(parents=True, exist_ok=True)
-        image = self.out / f"bitoscope-{self.manifest.version}-linux-{ARCH}.AppImage"
+        image = self.out / f"{base_name(self.manifest)}-linux-{ARCH}.AppImage"
         image.unlink(missing_ok=True)
         self.steps.run("Build AppImage", [str(appimagetool), "--no-appstream", "--runtime-file", str(runtime),
                                           str(appdir), str(image)],
@@ -570,18 +615,28 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--out", type=Path, default=root / "out")
     parser.add_argument("--jobs", type=int, default=None, help="compile jobs at once (default and most: physical cores)")
     parser.add_argument("--tools-dir", type=Path, default=Path.home() / ".cache" / "bitoscope-dist-tools")
+    parser.add_argument("--nightly-manifest-out", type=Path, default=root / "nightly-manifest.json",
+                        help="target nightly-manifest: file to write (default: %(default)s)")
     arguments = parser.parse_args(argv)
-    for name in ("manifest", "work", "out", "tools_dir"):
+    for name in ("manifest", "work", "out", "tools_dir", "nightly_manifest_out"):
         setattr(arguments, name, getattr(arguments, name).expanduser().resolve())
     return arguments
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
+        arguments = parse_arguments(argv)
+        manifest = parse_manifest(arguments.manifest.read_text())
+        if arguments.target == "nightly-manifest":
+            data = nightly_manifest(manifest, remote_head, datetime.now(timezone.utc).date())
+            arguments.nightly_manifest_out.write_text(json.dumps(data, indent=2) + "\n")
+            for repo in data["repos"]:
+                print(f"{repo['name']}: {repo['branch']} at {repo['commit']}")
+            print(f"Nightly manifest {arguments.nightly_manifest_out}, version {data['version']}.")
+            return 0
         if sys.platform != "linux":
             raise DistError(f"Linux only, not {sys.platform}")
-        arguments = parse_arguments(argv)
-        distribution = Distribution(arguments, parse_manifest(arguments.manifest.read_text()))
+        distribution = Distribution(arguments, manifest)
         if arguments.target in ("all", "fetch"):
             distribution.fetch()
         if arguments.target in ("all", "build"):

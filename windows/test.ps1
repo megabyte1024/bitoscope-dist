@@ -259,10 +259,51 @@ Test-Case 'manifest needs every repo with full commit' {
         $good = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'manifest.json') -Raw
         [System.IO.File]::WriteAllText($path, $good)
         Assert-Equal 3 @((Read-Manifest $path).repos).Count 'repo count'
-        [System.IO.File]::WriteAllText($path, ($good -replace '"commit": "a1c6cf39[0-9a-f]+"', '"commit": "a1c6cf39"'))
+        [System.IO.File]::WriteAllText($path, ($good -replace '"commit": "([0-9a-f]{8})[0-9a-f]{32}"', '"commit": "$1"'))
         Assert-Throws { Read-Manifest $path } 'commit of bitoscope is not 40 hex digits'
         [System.IO.File]::WriteAllText($path, ($good -replace '"version": "[^"]+"', '"version": "0.4"'))
         Assert-Throws { Read-Manifest $path } 'not MAJOR.MINOR.PATCH'
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+function New-NightlyManifestText {
+    return @'
+{
+  "version": "0.4.26324",
+  "nightly": true,
+  "repos": [
+    {"name": "bitoscope", "url": "https://example.invalid/a.git", "branch": "main", "commit": "1111111111111111111111111111111111111111"},
+    {"name": "bitoscope-fnirsi-dla", "url": "https://example.invalid/b.git", "branch": "main", "commit": "2222222222222222222222222222222222222222"},
+    {"name": "bitoscope-sigrok-bridge", "url": "https://example.invalid/c.git", "branch": "main", "commit": "3333333333333333333333333333333333333333"}
+  ]
+}
+'@
+}
+
+Test-Case 'manifest takes branch instead of tag' {
+    $root = New-TempFolder
+    try {
+        $path = Join-Path $root 'manifest.json'
+        [System.IO.File]::WriteAllText($path, (New-NightlyManifestText))
+        $data = Read-Manifest $path
+        Assert-Equal 'main' (Get-ManifestRepo $data 'bitoscope').branch
+        [System.IO.File]::WriteAllText($path, ((New-NightlyManifestText) -replace '"branch": "main", ', ''))
+        Assert-Throws { Read-Manifest $path } 'needs url and tag or branch'
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'release and nightly have own names and upgrade codes' {
+    $root = New-TempFolder
+    try {
+        $path = Join-Path $root 'manifest.json'
+        [System.IO.File]::WriteAllText($path, (New-NightlyManifestText))
+        $nightly = Get-Naming (Read-Manifest $path)
+        $release = Get-Naming (Read-Manifest (Join-Path (Split-Path -Parent $PSScriptRoot) 'manifest.json'))
+        Assert-Equal 'Bitoscope Nightly' $nightly.Name
+        Assert-Equal 'bitoscope-nightly' $nightly.Base
+        Assert-Equal 'Bitoscope' $release.Name
+        if ($release.Base -notmatch '^bitoscope-\d+\.\d+\.\d+$') { throw "release base $($release.Base)" }
+        if ($release.UpgradeCode -eq $nightly.UpgradeCode) { throw 'release and nightly share upgrade code' }
     } finally { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 

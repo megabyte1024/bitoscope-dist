@@ -1,11 +1,11 @@
 {
-  "version": "0.4.0",
+  "version": "0.4.1",
   "repos": [
     {
       "name": "bitoscope",
       "url": "https://github.com/megabyte1024/bitoscope.git",
-      "tag": "v0.4.0",
-      "commit": "a1c6cf39fb16d0d72e103cc041cbc70a32fca18d"
+      "branch": "main",
+      "commit": "a5a6d4d77bf84abd6987a6cac246889ce9508737"
     },
     {
       "name": "bitoscope-fnirsi-dla",

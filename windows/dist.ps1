@@ -14,15 +14,43 @@ function Read-Manifest([string]$Path) {
         $repo = @($manifest.repos | Where-Object { $_.name -eq $name })
         if ($repo.Count -ne 1) { throw "manifest must name repo $name once" }
         if ($repo[0].commit -notmatch '^[0-9a-f]{40}$') { throw "manifest: commit of $name is not 40 hex digits" }
-        if ([string]::IsNullOrEmpty($repo[0].tag) -or [string]::IsNullOrEmpty($repo[0].url)) {
-            throw "manifest: $name needs url and tag"
+        if ([string]::IsNullOrEmpty((Get-Field $repo[0] 'url')) -or
+            ([string]::IsNullOrEmpty((Get-Field $repo[0] 'tag')) -and [string]::IsNullOrEmpty((Get-Field $repo[0] 'branch')))) {
+            throw "manifest: $name needs url and tag or branch"
         }
     }
     return $manifest
 }
 
+function Get-Field($Object, [string]$Name) {
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
 function Get-ManifestRepo($Manifest, [string]$Name) {
     return @($Manifest.repos | Where-Object { $_.name -eq $Name })[0]
+}
+
+function Get-RefText($Repo) {
+    $tag = Get-Field $Repo 'tag'
+    if (-not [string]::IsNullOrEmpty($tag)) { return "tag $tag" }
+    return "branch $(Get-Field $Repo 'branch')"
+}
+
+function Get-Naming($Manifest) {
+    if ((Get-Field $Manifest 'nightly') -eq $true) {
+        return [pscustomobject]@{
+            Name = 'Bitoscope Nightly'
+            Base = 'bitoscope-nightly'
+            UpgradeCode = '{5B0F5448-17C3-4625-8FE1-DB6713DEBC75}'
+        }
+    }
+    return [pscustomobject]@{
+        Name = 'Bitoscope'
+        Base = "bitoscope-$($Manifest.version)"
+        UpgradeCode = '{140CE35C-0B96-4A07-83C9-03B4E1B59042}'
+    }
 }
 
 function ConvertTo-ArgumentText([string[]]$Arguments) {
@@ -102,13 +130,21 @@ function Sync-Repo($Repo, [string]$Folder, [string]$Logs) {
     }
     New-Item -ItemType Directory -Force -Path $Folder | Out-Null
     Invoke-Step "Init $($Repo.name)" $git @('init', '--quiet', $Folder) -Logs $Logs
-    Invoke-Step "Fetch $($Repo.name) $($Repo.tag)" $git @('-C', $Folder, 'fetch', '--quiet', '--depth', '1', $Repo.url,
-        "+refs/tags/$($Repo.tag):refs/tags/$($Repo.tag)") -Logs $Logs
-    $tagged = Get-GitOutput $Folder @('rev-parse', "refs/tags/$($Repo.tag)^{commit}")
-    if ($tagged -ne $Repo.commit) {
-        throw "tag $($Repo.tag) of $($Repo.url) is commit $tagged, manifest names $($Repo.commit)"
+    $tag = Get-Field $Repo 'tag'
+    if (-not [string]::IsNullOrEmpty($tag)) {
+        Invoke-Step "Fetch $($Repo.name) $tag" $git @('-C', $Folder, 'fetch', '--quiet', '--depth', '1', $Repo.url,
+            "+refs/tags/$($tag):refs/tags/$tag") -Logs $Logs
+        $tagged = Get-GitOutput $Folder @('rev-parse', "refs/tags/$tag^{commit}")
+        if ($tagged -ne $Repo.commit) {
+            throw "tag $tag of $($Repo.url) is commit $tagged, manifest names $($Repo.commit)"
+        }
+        $checkout = "refs/tags/$tag"
+    } else {
+        Invoke-Step "Fetch $($Repo.name) $(Get-Field $Repo 'branch') at $($Repo.commit.Substring(0, 12))" $git @('-C', $Folder,
+            'fetch', '--quiet', '--depth', '1', $Repo.url, $Repo.commit) -Logs $Logs
+        $checkout = 'FETCH_HEAD'
     }
-    Invoke-Step "Check out $($Repo.name)" $git @('-C', $Folder, 'checkout', '--quiet', '--detach', "refs/tags/$($Repo.tag)") -Logs $Logs
+    Invoke-Step "Check out $($Repo.name)" $git @('-C', $Folder, 'checkout', '--quiet', '--detach', $checkout) -Logs $Logs
     Invoke-Step "Submodules of $($Repo.name)" $git @('-C', $Folder, 'submodule', 'update', '--init', '--recursive',
         '--depth', '1') -Logs $Logs
 }
