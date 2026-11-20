@@ -1,0 +1,23 @@
+{
+  "version": "0.4.0",
+  "repos": [
+    {
+      "name": "bitoscope",
+      "url": "https://github.com/megabyte1024/bitoscope.git",
+      "tag": "v0.4.0",
+      "commit": "a1c6cf39fb16d0d72e103cc041cbc70a32fca18d"
+    },
+    {
+      "name": "bitoscope-fnirsi-dla",
+      "url": "https://github.com/megabyte1024/bitoscope-fnirsi-dla.git",
+      "tag": "v0.4.0",
+      "commit": "4c564419788d9f366e628ccc4768eb4ebfffa553"
+    },
+    {
+      "name": "bitoscope-sigrok-bridge",
+      "url": "https://github.com/megabyte1024/bitoscope-sigrok-bridge.git",
+      "tag": "v0.4.0",
+      "commit": "eec735ba7fadb8addbdb617f8ed0486c02960000"
+    }
+  ]
+}
