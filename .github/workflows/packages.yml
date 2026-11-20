@@ -32,6 +32,19 @@ jobs:
       - name: Test packaging scripts
         run: .\windows\test.ps1
 
+      - name: Install CMake 4.4.3
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'cmake-4.4.3-windows-x86_64.zip'
+          Invoke-WebRequest -Uri 'https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-windows-x86_64.zip' -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash
+          if ($hash -ne '4D52EBAB7193A698651639ED80D8D04FD903358843572CF44C7FD234CB7C26AB') { throw "CMake download has SHA-256 $hash" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $env:RUNNER_TEMP)
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP 'cmake-4.4.3-windows-x86_64\bin')
+
+      - name: Show CMake version
+        run: cmake --version
+
       - name: Install libusb with vcpkg
         run: |
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libusb:x64-windows
