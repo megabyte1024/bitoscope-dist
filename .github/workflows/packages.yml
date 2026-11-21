@@ -21,6 +21,7 @@ jobs:
         shell: powershell
     env:
       MANIFEST: ${{ inputs.nightly && 'nightly-manifest.json' || 'manifest.json' }}
+      VCPKG_COMMIT: e6f9e70a29a3e80a1fc510d8503304315447112f
     steps:
       - uses: actions/checkout@v7
 
@@ -31,6 +32,17 @@ jobs:
 
       - name: Test packaging scripts
         run: .\windows\test.ps1
+
+      - name: Install vcpkg at fixed commit
+        run: |
+          $vcpkg = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          git init --quiet $vcpkg
+          git -C $vcpkg fetch --quiet --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_COMMIT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C $vcpkg checkout --quiet --detach FETCH_HEAD
+          & "$vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VCPKG_PINNED=$vcpkg"
 
       - name: Install CMake 4.4.3
         run: |
@@ -47,19 +59,19 @@ jobs:
 
       - name: Install libusb with vcpkg
         run: |
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libusb:x64-windows
+          & "$env:VCPKG_PINNED\vcpkg.exe" install libusb:x64-windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install MSYS2 packages for libsigrok
         run: |
-          C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --needed --noconfirm base-devel mingw-w64-ucrt-x86_64-{gcc,autotools,pkgconf,tools-git,ntldd}"
+          C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --needed --noconfirm base-devel mingw-w64-ucrt-x86_64-{gcc,autotools,pkgconf,tools-git,ntldd,glib2,libzip,zlib}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build zip, msi and exe
-        run: .\windows\build.ps1 -Target all -Manifest $env:MANIFEST -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT
+        run: .\windows\build.ps1 -Target all -Manifest $env:MANIFEST -VcpkgRoot $env:VCPKG_PINNED
 
       - name: Install and uninstall msi and exe
-        run: .\windows\build.ps1 -Target install-test -Manifest $env:MANIFEST -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT
+        run: .\windows\build.ps1 -Target install-test -Manifest $env:MANIFEST -VcpkgRoot $env:VCPKG_PINNED
 
       - uses: actions/upload-artifact@v7
         with:
