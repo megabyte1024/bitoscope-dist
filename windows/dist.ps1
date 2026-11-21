@@ -83,7 +83,9 @@ function Invoke-Step {
         [string[]]$Arguments = @(),
         [string]$WorkingDirectory = (Get-Location).Path,
         [hashtable]$Environment = @{},
-        [Parameter(Mandatory)] [string]$Logs
+        [Parameter(Mandatory)] [string]$Logs,
+        [int]$Attempts = 1,
+        [int]$RetrySeconds = 30
     )
     $script:StepNumber++
     Write-Host "==> $Title"
@@ -98,16 +100,23 @@ function Invoke-Step {
     try {
         $argumentText = ConvertTo-ArgumentText $Arguments
         [System.IO.File]::WriteAllText("$log.cmd.txt", "$Program $argumentText`r`n")
-        $startArguments = @{
-            FilePath = $Program
-            WorkingDirectory = $WorkingDirectory
-            RedirectStandardOutput = "$log.out.txt"
-            RedirectStandardError = "$log.err.txt"
-            NoNewWindow = $true
-            PassThru = $true
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            $startArguments = @{
+                FilePath = $Program
+                WorkingDirectory = $WorkingDirectory
+                RedirectStandardOutput = "$log.out.txt"
+                RedirectStandardError = "$log.err.txt"
+                NoNewWindow = $true
+                PassThru = $true
+            }
+            if ($argumentText -ne '') { $startArguments.ArgumentList = $argumentText }
+            $process = Invoke-ProgramAndWait $startArguments
+            if ($process.ExitCode -eq 0) { break }
+            if ($attempt -lt $Attempts) {
+                Write-Host "    attempt $attempt of $Attempts failed (exit $($process.ExitCode)); next in $RetrySeconds s"
+                Start-Sleep -Seconds $RetrySeconds
+            }
         }
-        if ($argumentText -ne '') { $startArguments.ArgumentList = $argumentText }
-        $process = Invoke-ProgramAndWait $startArguments
     } finally {
         foreach ($name in $saved.Keys) {
             [Environment]::SetEnvironmentVariable($name, $saved[$name])
@@ -115,7 +124,8 @@ function Invoke-Step {
     }
     if ($process.ExitCode -ne 0) {
         $tail = @(Get-Content -LiteralPath "$log.out.txt", "$log.err.txt" -ErrorAction SilentlyContinue | Select-Object -Last 40)
-        throw "$Title failed (exit $($process.ExitCode)); full output in $log.*.txt:`n$($tail -join "`n")"
+        $after = if ($Attempts -gt 1) { " after $Attempts attempts" } else { '' }
+        throw "$Title failed (exit $($process.ExitCode))$after; full output in $log.*.txt:`n$($tail -join "`n")"
     }
 }
 
@@ -140,7 +150,7 @@ function Sync-Repo($Repo, [string]$Folder, [string]$Logs) {
     $tag = Get-Field $Repo 'tag'
     if (-not [string]::IsNullOrEmpty($tag)) {
         Invoke-Step "Fetch $($Repo.name) $tag" $git @('-C', $Folder, 'fetch', '--quiet', '--depth', '1', $Repo.url,
-            "+refs/tags/$($tag):refs/tags/$tag") -Logs $Logs
+            "+refs/tags/$($tag):refs/tags/$tag") -Logs $Logs -Attempts 4
         $tagged = Get-GitOutput $Folder @('rev-parse', "refs/tags/$tag^{commit}")
         if ($tagged -ne $Repo.commit) {
             throw "tag $tag of $($Repo.url) is commit $tagged, manifest names $($Repo.commit)"
@@ -148,12 +158,12 @@ function Sync-Repo($Repo, [string]$Folder, [string]$Logs) {
         $checkout = "refs/tags/$tag"
     } else {
         Invoke-Step "Fetch $($Repo.name) $(Get-Field $Repo 'branch') at $($Repo.commit.Substring(0, 12))" $git @('-C', $Folder,
-            'fetch', '--quiet', '--depth', '1', $Repo.url, $Repo.commit) -Logs $Logs
+            'fetch', '--quiet', '--depth', '1', $Repo.url, $Repo.commit) -Logs $Logs -Attempts 4
         $checkout = 'FETCH_HEAD'
     }
     Invoke-Step "Check out $($Repo.name)" $git @('-C', $Folder, 'checkout', '--quiet', '--detach', $checkout) -Logs $Logs
     Invoke-Step "Submodules of $($Repo.name)" $git @('-C', $Folder, 'submodule', 'update', '--init', '--recursive',
-        '--depth', '1') -Logs $Logs
+        '--depth', '1') -Logs $Logs -Attempts 4
 }
 
 function Get-VisualStudio {

@@ -210,6 +210,32 @@ Test-Case 'step does not wait for process its program leaves behind' {
     }
 }
 
+function Invoke-FlakyStep([int]$FailTimes, [hashtable]$Options) {
+    $root = New-TempFolder
+    try {
+        $script = Join-Path $root 'flaky.ps1'
+        [System.IO.File]::WriteAllText($script, 'param($Counter, $FailTimes) $n = 1; if (Test-Path $Counter) { $n = [int](Get-Content $Counter) + 1 }; Set-Content $Counter $n; if ($n -le [int]$FailTimes) { exit 1 }')
+        $counter = Join-Path $root 'count.txt'
+        $error = $null
+        try { Invoke-Step 'Flaky' 'powershell.exe' @('-NoProfile', '-File', $script, $counter, "$FailTimes") -Logs $root @Options } catch { $error = "$_" }
+        return [pscustomobject]@{ Runs = [string](Get-Content $counter); Error = $error }
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'step is repeated until it works' {
+    $result = Invoke-FlakyStep 2 @{ Attempts = 3; RetrySeconds = 0 }
+    Assert-Equal @('3', '') @($result.Runs, [string]$result.Error)
+}
+
+Test-Case 'step gives up after last attempt and by default runs once' {
+    $result = Invoke-FlakyStep 5 @{ Attempts = 3; RetrySeconds = 0 }
+    Assert-Equal '3' $result.Runs 'runs with 3 attempts'
+    if ($result.Error -notmatch 'Flaky failed \(exit 1\) after 3 attempts') { throw "message: $($result.Error)" }
+    $once = Invoke-FlakyStep 1 @{}
+    Assert-Equal '1' $once.Runs 'runs by default'
+    if ($once.Error -notmatch 'Flaky failed \(exit 1\); full output in') { throw "message: $($once.Error)" }
+}
+
 Test-Case 'arguments are quoted as Windows programs read them' {
     Assert-Equal 'a "b c" "" "d\"e" "f g\\"' (ConvertTo-ArgumentText @('a', 'b c', '', 'd"e', 'f g\'))
 }

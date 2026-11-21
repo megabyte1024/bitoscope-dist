@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ TARGETS = ("all", "fetch", "build", "stage", "package", "nightly-manifest")
 REPOS = {"main": "bitoscope", "dla": "bitoscope-fnirsi-dla", "bridge": "bitoscope-sigrok-bridge"}
 
 ARCH = "x86_64"
+
+NETWORK_ATTEMPTS = 4
 
 CHECKER = "bitoscope_cli"
 
@@ -166,20 +169,27 @@ class Steps:
     count: int = 0
 
     def run(self, title: str, command: list[str], cwd: Path | None = None,
-            environment: dict[str, str] | None = None) -> None:
+            environment: dict[str, str] | None = None, attempts: int = 1, retry_seconds: int = 30) -> None:
         print(f"==> {title}", flush=True)
         self.count += 1
         self.logs.mkdir(parents=True, exist_ok=True)
         slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
         log = self.logs / f"{self.count:02d}-{slug}.log"
-        with open(log, "w") as stream:
-            stream.write("$ " + " ".join(command) + "\n")
-            stream.flush()
-            result = subprocess.run(command, cwd=cwd, env={**os.environ, **(environment or {})}, stdout=stream,
-                                    stderr=subprocess.STDOUT)
-        if result.returncode != 0:
-            tail = "\n".join(log.read_text(errors="replace").splitlines()[-40:])
-            raise DistError(f"{title} failed (exit {result.returncode}); full output in {log}:\n{tail}")
+        for attempt in range(1, attempts + 1):
+            with open(log, "w") as stream:
+                stream.write("$ " + " ".join(command) + "\n")
+                stream.flush()
+                result = subprocess.run(command, cwd=cwd, env={**os.environ, **(environment or {})}, stdout=stream,
+                                        stderr=subprocess.STDOUT)
+            if result.returncode == 0:
+                return
+            if attempt < attempts:
+                print(f"    attempt {attempt} of {attempts} failed (exit {result.returncode}); "
+                      f"next in {retry_seconds} s", flush=True)
+                time.sleep(retry_seconds)
+        tail = "\n".join(log.read_text(errors="replace").splitlines()[-40:])
+        after = f" after {attempts} attempts" if attempts > 1 else ""
+        raise DistError(f"{title} failed (exit {result.returncode}){after}; full output in {log}:\n{tail}")
 
 
 def git_output(folder: Path, *args: str) -> str:
@@ -207,18 +217,20 @@ def sync_repo(repo: Repo, folder: Path, steps: Steps) -> None:
     steps.run(f"Init {repo.name}", ["git", "init", "--quiet", str(folder)])
     if repo.tag:
         steps.run(f"Fetch {repo.name} {repo.tag}", ["git", "-C", str(folder), "fetch", "--quiet", "--depth", "1",
-                                                   repo.url, f"+refs/tags/{repo.tag}:refs/tags/{repo.tag}"])
+                                                   repo.url, f"+refs/tags/{repo.tag}:refs/tags/{repo.tag}"],
+                  attempts=NETWORK_ATTEMPTS)
         tagged = git_output(folder, "rev-parse", f"refs/tags/{repo.tag}^{{commit}}")
         if tagged != repo.commit:
             raise DistError(f"tag {repo.tag} of {repo.url} is commit {tagged}, manifest names {repo.commit}")
         checkout = f"refs/tags/{repo.tag}"
     else:
         steps.run(f"Fetch {repo.name} {repo.branch} at {repo.commit[:12]}",
-                  ["git", "-C", str(folder), "fetch", "--quiet", "--depth", "1", repo.url, repo.commit])
+                  ["git", "-C", str(folder), "fetch", "--quiet", "--depth", "1", repo.url, repo.commit],
+                  attempts=NETWORK_ATTEMPTS)
         checkout = "FETCH_HEAD"
     steps.run(f"Check out {repo.name}", ["git", "-C", str(folder), "checkout", "--quiet", "--detach", checkout])
     steps.run(f"Submodules of {repo.name}", ["git", "-C", str(folder), "submodule", "update", "--init", "--recursive",
-                                             "--depth", "1"])
+                                             "--depth", "1"], attempts=NETWORK_ATTEMPTS)
 
 
 def require_tools() -> None:
@@ -401,7 +413,8 @@ class Distribution:
         jobs = build_jobs(main, self.arguments.jobs)
         self.steps.run("Build libsigrok", ["sh", "scripts/build_libsigrok_linux.sh"], cwd=bridge)
         if not list((bridge / "third_party" / "sigrok-firmware").glob("*.fw")):
-            self.steps.run("Fetch sigrok firmware", ["sh", "scripts/fetch_sigrok_firmware.sh"], cwd=bridge)
+            self.steps.run("Fetch sigrok firmware", ["sh", "scripts/fetch_sigrok_firmware.sh"], cwd=bridge,
+                           attempts=NETWORK_ATTEMPTS)
         self.steps.run("Configure bridge", ["cmake", "-S", str(bridge), "-B", str(bridge / "build"),
                                             "-DCMAKE_BUILD_TYPE=Release"])
         self.steps.run("Build bridge", ["cmake", "--build", str(bridge / "build"), "--parallel", str(jobs)])

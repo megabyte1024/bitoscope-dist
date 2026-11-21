@@ -75,6 +75,37 @@ class NightlyTest(unittest.TestCase):
         self.assertEqual(build.base_name(nightly), "bitoscope-nightly")
 
 
+class RetryTest(unittest.TestCase):
+    CODE = ("import sys, pathlib; p = pathlib.Path(sys.argv[1]); "
+            "n = int(p.read_text()) + 1 if p.exists() else 1; p.write_text(str(n)); "
+            "sys.exit(1 if n <= int(sys.argv[2]) else 0)")
+
+    def run_step(self, fail_times, **options):
+        with tempfile.TemporaryDirectory() as folder:
+            counter = Path(folder) / "count.txt"
+            steps = build.Steps(Path(folder) / "logs")
+            try:
+                steps.run("Flaky", [sys.executable, "-c", self.CODE, str(counter), str(fail_times)], **options)
+                error = None
+            except build.DistError as caught:
+                error = str(caught)
+            return counter.read_text(), error
+
+    def test_step_is_repeated_until_it_works(self):
+        runs, error = self.run_step(2, attempts=3, retry_seconds=0)
+        self.assertEqual((runs, error), ("3", None))
+
+    def test_step_gives_up_after_last_attempt(self):
+        runs, error = self.run_step(5, attempts=3, retry_seconds=0)
+        self.assertEqual(runs, "3")
+        self.assertIn("Flaky failed (exit 1) after 3 attempts", error)
+
+    def test_step_runs_once_by_default(self):
+        runs, error = self.run_step(1)
+        self.assertEqual(runs, "1")
+        self.assertIn("Flaky failed (exit 1); full output in", error)
+
+
 class LibraryTest(unittest.TestCase):
     def test_closure_skips_system_and_own_libraries(self):
         graph = {"libsigrok.so.4": ["libglib-2.0.so.0", "libzip.so.5", "libc.so.6"],

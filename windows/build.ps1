@@ -22,6 +22,7 @@ Set-StrictMode -Version 3
 $Manufacturer = 'Bitoscope project'
 $ProjectUrl = 'https://github.com/megabyte1024/bitoscope'
 $Repos = [ordered]@{ main = 'bitoscope'; dla = 'bitoscope-fnirsi-dla'; bridge = 'bitoscope-sigrok-bridge' }
+$NetworkAttempts = 4
 
 function Get-VcpkgRoot {
     foreach ($candidate in @($VcpkgRoot, $env:VCPKG_ROOT, $env:VCPKG_INSTALLATION_ROOT, 'C:\vcpkg')) {
@@ -81,7 +82,7 @@ function Invoke-Build {
     Invoke-Step 'Build libsigrok' $bash @('-lc', 'sh scripts/build_libsigrok.sh') -WorkingDirectory $bridge -Environment $msys2 -Logs $logs
     if (-not (Test-Path -Path "$bridge\third_party\sigrok-firmware\*.fw")) {
         Invoke-Step 'Fetch sigrok firmware' $bash @('-lc', 'sh scripts/fetch_sigrok_firmware.sh') -WorkingDirectory $bridge `
-            -Environment $msys2 -Logs $logs
+            -Environment $msys2 -Logs $logs -Attempts $NetworkAttempts
     }
     Invoke-Step 'Configure bridge with libsigrok' 'cmake' @('-S', $bridge, '-B', "$bridge\build") -Logs $logs
     Invoke-Step 'Build bridge' 'cmake' @('--build', "$bridge\build", '--config', 'Release') -Logs $logs
