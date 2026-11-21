@@ -125,6 +125,26 @@ Test-Case 'component GUID depends on path only' {
     if ((Get-StableGuid 'a') -notmatch '^\{[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}\}$') { throw 'GUID format' }
 }
 
+Test-Case 'component ids differ between products and stay equal between versions of one product' {
+    $root = New-TempFolder
+    try {
+        New-TestStage $root
+        $files = Get-StageFiles $root
+        function Get-ComponentIds($product) {
+            $table = @((New-MsiTables $product $files).Tables | Where-Object { $_.Name -eq 'Component' })[0]
+            return @($table.Rows | ForEach-Object { $_[1] })
+        }
+        $release = New-TestProduct
+        $nightly = New-TestProduct
+        $nightly.UpgradeCode = '{5B0F5448-17C3-4625-8FE1-DB6713DEBC75}'
+        $later = New-TestProduct
+        $later.Version = '1.2.4'
+        $shared = @(Get-ComponentIds $release | Where-Object { (Get-ComponentIds $nightly) -contains $_ }).Count
+        Assert-Equal 0 $shared 'component ids shared by release and nightly'
+        Assert-Equal (Get-ComponentIds $release) (Get-ComponentIds $later) 'component ids of two versions of one product'
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
 Test-Case 'msi tables need program' {
     $root = New-TempFolder
     try {

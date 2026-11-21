@@ -234,7 +234,7 @@ function New-MsiTables($Product, [object[]]$Files) {
         $hex = (Get-StableHex "file $($entry.Relative)").Substring(0, 24)
         $fileKey = "f$hex"
         $componentKey = "c$hex"
-        Add-MsiRow $component @($componentKey, (Get-StableGuid $entry.Relative), $directoryId, 256, $null, $fileKey)
+        Add-MsiRow $component @($componentKey, (Get-StableGuid "$($Product.UpgradeCode) $($entry.Relative)"), $directoryId, 256, $null, $fileKey)
         Add-MsiRow $file @($fileKey, $componentKey, (Get-MsiFileName $leaf (Get-NamesIn $directoryId)), $entry.Size,
             $null, $null, $null, $sequence)
         Add-MsiRow $featureComponents @('Main', $componentKey)
