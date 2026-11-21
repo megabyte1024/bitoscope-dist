@@ -237,7 +237,10 @@ function Invoke-Package($Data) {
 function Test-Installed([string]$Stage, [string]$Folder, [string]$Checker, [string]$Dumpbin, [string]$What) {
     $expected = @(Get-ChildItem -LiteralPath $Stage -Recurse -File).Count
     $found = @(Get-ChildItem -LiteralPath $Folder -Recurse -File -ErrorAction SilentlyContinue).Count
-    if ($found -ne $expected) { throw "$What installed $found files into $Folder, distribution has $expected" }
+    if ($found -ne $expected) {
+        $perUser = @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA "Programs\$($Naming.Name)") -Recurse -File -ErrorAction SilentlyContinue).Count
+        throw "$What installed $found files into $Folder, distribution has $expected (per-user folder holds $perUser files)"
+    }
     $shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\$($Naming.Name).lnk"
     if (-not (Test-Path -LiteralPath $shortcut)) { throw "$What made no Start menu entry $shortcut" }
     Test-Distribution $Folder $Checker $Dumpbin (Join-Path $Work 'home')

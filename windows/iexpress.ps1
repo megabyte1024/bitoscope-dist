@@ -40,7 +40,7 @@ function ConvertTo-SedText([string]$MsiPath, [string]$OutputPath, [string]$Frien
         "FriendlyName=$FriendlyName",
         "AppLaunched=msiexec.exe /i $msiName",
         'PostInstallCmd=<None>',
-        "AdminQuietInstCmd=cmd /c fltmc >nul 2>&1 & if errorlevel 1 (msiexec.exe /i $msiName /qn MSIINSTALLPERUSER=1) else msiexec.exe /i $msiName /qn",
+        "AdminQuietInstCmd=cmd /c start /wait msiexec.exe /i $msiName /qn & if errorlevel 1 if not errorlevel 1641 start /wait msiexec.exe /i $msiName /qn MSIINSTALLPERUSER=1",
         "UserQuietInstCmd=msiexec.exe /i $msiName /qn MSIINSTALLPERUSER=1",
         "FILE0=`"$msiName`"",
         '[SourceFiles]',
