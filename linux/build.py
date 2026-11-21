@@ -233,6 +233,33 @@ def sync_repo(repo: Repo, folder: Path, steps: Steps) -> None:
                                              "--depth", "1"], attempts=NETWORK_ATTEMPTS)
 
 
+def has_firmware(folder: Path | None) -> bool:
+    return folder is not None and folder.is_dir() and any(folder.glob("*.fw"))
+
+
+def copy_firmware(source: Path, destination: Path) -> None:
+    remove_tree(destination)
+    shutil.copytree(source, destination)
+
+
+def provide_firmware(fetch, target: Path, cache: Path | None) -> str:
+    if has_firmware(target):
+        result = "present"
+    else:
+        try:
+            fetch()
+            result = "fetched"
+        except DistError as error:
+            if not has_firmware(cache):
+                raise
+            print(f"    NOTICE: {error}\n    using firmware kept from earlier successful download in {cache}", flush=True)
+            copy_firmware(cache, target)
+            result = "cached"
+    if cache is not None and result != "cached" and has_firmware(target):
+        copy_firmware(target, cache)
+    return result
+
+
 def require_tools() -> None:
     problems = [f"program not found: {tool}" for tool in TOOLS if shutil.which(tool) is None]
     if shutil.which("pkg-config"):
@@ -412,9 +439,10 @@ class Distribution:
         main, dla, bridge = self.source("main"), self.source("dla"), self.source("bridge")
         jobs = build_jobs(main, self.arguments.jobs)
         self.steps.run("Build libsigrok", ["sh", "scripts/build_libsigrok_linux.sh"], cwd=bridge)
-        if not list((bridge / "third_party" / "sigrok-firmware").glob("*.fw")):
-            self.steps.run("Fetch sigrok firmware", ["sh", "scripts/fetch_sigrok_firmware.sh"], cwd=bridge,
-                           attempts=NETWORK_ATTEMPTS)
+        provide_firmware(
+            lambda: self.steps.run("Fetch sigrok firmware", ["sh", "scripts/fetch_sigrok_firmware.sh"], cwd=bridge,
+                                   attempts=NETWORK_ATTEMPTS),
+            bridge / "third_party" / "sigrok-firmware", self.arguments.firmware_dir)
         self.steps.run("Configure bridge", ["cmake", "-S", str(bridge), "-B", str(bridge / "build"),
                                             "-DCMAKE_BUILD_TYPE=Release"])
         self.steps.run("Build bridge", ["cmake", "--build", str(bridge / "build"), "--parallel", str(jobs)])
@@ -630,9 +658,14 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--tools-dir", type=Path, default=Path.home() / ".cache" / "bitoscope-dist-tools")
     parser.add_argument("--nightly-manifest-out", type=Path, default=root / "nightly-manifest.json",
                         help="target nightly-manifest: file to write (default: %(default)s)")
+    parser.add_argument("--firmware-dir", type=Path, default=None,
+                        help="folder that keeps the last downloaded sigrok firmware: used when the download fails, "
+                             "refilled after a download")
     arguments = parser.parse_args(argv)
-    for name in ("manifest", "work", "out", "tools_dir", "nightly_manifest_out"):
-        setattr(arguments, name, getattr(arguments, name).expanduser().resolve())
+    for name in ("manifest", "work", "out", "tools_dir", "nightly_manifest_out", "firmware_dir"):
+        value = getattr(arguments, name)
+        if value is not None:
+            setattr(arguments, name, value.expanduser().resolve())
     return arguments
 
 

@@ -129,6 +129,30 @@ function Invoke-Step {
     }
 }
 
+function Test-Firmware([string]$Folder) {
+    return (-not [string]::IsNullOrEmpty($Folder)) -and (Test-Path -LiteralPath $Folder -PathType Container) -and
+        ($null -ne (Get-ChildItem -LiteralPath $Folder -Filter '*.fw' -File | Select-Object -First 1))
+}
+
+function Copy-Firmware([string]$Source, [string]$Destination) {
+    if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
+    Copy-Item -LiteralPath $Source -Destination $Destination -Recurse
+}
+
+function Use-CachedFirmware([string]$Cache, [string]$Target) {
+    if (-not (Test-Firmware $Cache)) { return $false }
+    Copy-Firmware $Cache $Target
+    return $true
+}
+
+function Save-FirmwareForCache([string]$Target, [string]$Cache) {
+    if ([string]::IsNullOrEmpty($Cache)) { return 'no cache' }
+    if (-not (Test-Firmware $Target)) { return 'no firmware' }
+    Copy-Firmware $Target $Cache
+    return 'saved'
+}
+
 function Get-GitOutput([string]$Folder, [string[]]$Arguments) {
     $output = & git -C $Folder @Arguments 2>$null
     if ($LASTEXITCODE -ne 0) { throw "git $($Arguments -join ' ') failed in $Folder" }

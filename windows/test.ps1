@@ -236,6 +236,52 @@ Test-Case 'step gives up after last attempt and by default runs once' {
     if ($once.Error -notmatch 'Flaky failed \(exit 1\); full output in') { throw "message: $($once.Error)" }
 }
 
+function New-FirmwareFolder([string]$Folder, [string]$Text) {
+    New-Item -ItemType Directory -Force -Path $Folder | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $Folder 'fx2lafw-a.fw'), $Text)
+    [System.IO.File]::WriteAllText((Join-Path $Folder 'COPYING'), 'licence')
+}
+
+function Read-Firmware([string]$Folder) { return [System.IO.File]::ReadAllText((Join-Path $Folder 'fx2lafw-a.fw')) }
+
+Test-Case 'downloaded firmware is kept in cache' {
+    $root = New-TempFolder
+    try {
+        $target = "$root\bridge\third_party\sigrok-firmware"; $cache = "$root\cache"
+        New-FirmwareFolder $target 'new'
+        Assert-Equal 'saved' (Save-FirmwareForCache $target $cache)
+        Assert-Equal 'new' (Read-Firmware $cache)
+        Assert-Equal 'licence' ([System.IO.File]::ReadAllText("$cache\COPYING"))
+        Assert-Equal 'no cache' (Save-FirmwareForCache $target '')
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'cached firmware replaces nothing without files and fills missing firmware' {
+    $root = New-TempFolder
+    try {
+        $target = "$root\bridge\third_party\sigrok-firmware"; $cache = "$root\cache"
+        Assert-Equal $false (Use-CachedFirmware $cache $target) 'cache folder missing'
+        Assert-Equal $false (Use-CachedFirmware '' $target) 'no cache folder named'
+        New-Item -ItemType Directory $cache | Out-Null; [System.IO.File]::WriteAllText("$cache\README", 'no firmware')
+        Assert-Equal $false (Use-CachedFirmware $cache $target) 'cache without .fw'
+        New-FirmwareFolder $cache 'cached'
+        Assert-Equal $true (Use-CachedFirmware $cache $target) 'cache with firmware'
+        Assert-Equal 'cached' (Read-Firmware $target)
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'newer download replaces older cache completely' {
+    $root = New-TempFolder
+    try {
+        $target = "$root\t"; $cache = "$root\cache"
+        New-FirmwareFolder $cache 'old'; [System.IO.File]::WriteAllText("$cache\leftover.fw", 'gone')
+        New-FirmwareFolder $target 'new'
+        [void](Save-FirmwareForCache $target $cache)
+        Assert-Equal 'new' (Read-Firmware $cache)
+        Assert-Equal $false (Test-Path "$cache\leftover.fw") 'leftover firmware file'
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
 Test-Case 'arguments are quoted as Windows programs read them' {
     Assert-Equal 'a "b c" "" "d\"e" "f g\\"' (ConvertTo-ArgumentText @('a', 'b c', '', 'd"e', 'f g\'))
 }

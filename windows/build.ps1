@@ -10,7 +10,8 @@ param(
     [ValidateSet('zip', 'msi', 'exe')]
     [string[]]$Formats = @('zip', 'msi', 'exe'),
     [string]$VcpkgRoot = '',
-    [string]$Msys2Root = 'C:\msys64'
+    [string]$Msys2Root = 'C:\msys64',
+    [string]$FirmwareDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,10 +81,20 @@ function Invoke-Build {
     Invoke-Step 'Configure bridge' 'cmake' @('-S', $bridge, '-B', "$bridge\build") -Logs $logs
     Invoke-Step 'Build bridge USB shim' 'cmake' @('--build', "$bridge\build", '--config', 'Release', '--target', 'bridge_usb') -Logs $logs
     Invoke-Step 'Build libsigrok' $bash @('-lc', 'sh scripts/build_libsigrok.sh') -WorkingDirectory $bridge -Environment $msys2 -Logs $logs
-    if (-not (Test-Path -Path "$bridge\third_party\sigrok-firmware\*.fw")) {
-        Invoke-Step 'Fetch sigrok firmware' $bash @('-lc', 'sh scripts/fetch_sigrok_firmware.sh') -WorkingDirectory $bridge `
-            -Environment $msys2 -Logs $logs -Attempts $NetworkAttempts
+    $firmware = "$bridge\third_party\sigrok-firmware"
+    $firmwareFromCache = $false
+    if (-not (Test-Firmware $firmware)) {
+        try {
+            Invoke-Step 'Fetch sigrok firmware' $bash @('-lc', 'sh scripts/fetch_sigrok_firmware.sh') -WorkingDirectory $bridge `
+                -Environment $msys2 -Logs $logs -Attempts $NetworkAttempts
+        } catch {
+            if (-not (Use-CachedFirmware $FirmwareDir $firmware)) { throw }
+            Write-Host "    NOTICE: $($_.Exception.Message.Split("`n")[0])"
+            Write-Host "    using firmware kept from earlier successful download in $FirmwareDir"
+            $firmwareFromCache = $true
+        }
     }
+    if (-not $firmwareFromCache) { [void](Save-FirmwareForCache $firmware $FirmwareDir) }
     Invoke-Step 'Configure bridge with libsigrok' 'cmake' @('-S', $bridge, '-B', "$bridge\build") -Logs $logs
     Invoke-Step 'Build bridge' 'cmake' @('--build', "$bridge\build", '--config', 'Release') -Logs $logs
 
@@ -279,6 +290,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 if ($Manifest -eq '') { $Manifest = Join-Path $RepoRoot 'manifest.json' }
 if ($Work -eq '') { $Work = Join-Path $RepoRoot 'work\windows' }
 if ($Out -eq '') { $Out = Join-Path $RepoRoot 'out' }
+if ($FirmwareDir -ne '') { $FirmwareDir = [System.IO.Path]::GetFullPath($FirmwareDir) }
 $data = Read-Manifest $Manifest
 $Naming = Get-Naming $data
 $Work = [System.IO.Path]::GetFullPath($Work)

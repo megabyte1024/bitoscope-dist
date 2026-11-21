@@ -106,6 +106,66 @@ class RetryTest(unittest.TestCase):
         self.assertIn("Flaky failed (exit 1); full output in", error)
 
 
+class FirmwareTest(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.root = Path(self.folder.name)
+        self.target = self.root / "bridge" / "third_party" / "sigrok-firmware"
+        self.cache = self.root / "cache"
+
+    def put(self, folder: Path, text: str) -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "fx2lafw-a.fw").write_text(text)
+        (folder / "COPYING").write_text("licence")
+
+    def downloads(self, text: str):
+        def fetch():
+            self.put(self.target, text)
+        return fetch
+
+    def failing_download(self):
+        raise build.DistError("Fetch sigrok firmware failed (exit 28) after 4 attempts")
+
+    def test_download_is_kept_in_cache(self):
+        result = build.provide_firmware(self.downloads("new"), self.target, self.cache)
+        self.assertEqual(result, "fetched")
+        self.assertEqual((self.cache / "fx2lafw-a.fw").read_text(), "new")
+        self.assertEqual((self.cache / "COPYING").read_text(), "licence")
+
+    def test_cache_is_used_when_download_fails(self):
+        self.put(self.cache, "cached")
+        result = build.provide_firmware(self.failing_download, self.target, self.cache)
+        self.assertEqual(result, "cached")
+        self.assertEqual((self.target / "fx2lafw-a.fw").read_text(), "cached")
+        self.assertEqual((self.cache / "fx2lafw-a.fw").read_text(), "cached")
+
+    def test_failure_stays_without_cache(self):
+        with self.assertRaisesRegex(build.DistError, "after 4 attempts"):
+            build.provide_firmware(self.failing_download, self.target, self.cache)
+        with self.assertRaisesRegex(build.DistError, "after 4 attempts"):
+            build.provide_firmware(self.failing_download, self.target, None)
+
+    def test_cache_without_firmware_files_is_no_cache(self):
+        self.cache.mkdir()
+        (self.cache / "README").write_text("no firmware")
+        with self.assertRaisesRegex(build.DistError, "after 4 attempts"):
+            build.provide_firmware(self.failing_download, self.target, self.cache)
+
+    def test_firmware_already_present_is_not_downloaded_again(self):
+        self.put(self.target, "present")
+        result = build.provide_firmware(self.failing_download, self.target, self.cache)
+        self.assertEqual(result, "present")
+        self.assertEqual((self.cache / "fx2lafw-a.fw").read_text(), "present")
+
+    def test_newer_download_replaces_older_cache(self):
+        self.put(self.cache, "old")
+        (self.cache / "leftover.fw").write_text("gone in new release")
+        build.provide_firmware(self.downloads("new"), self.target, self.cache)
+        self.assertEqual((self.cache / "fx2lafw-a.fw").read_text(), "new")
+        self.assertFalse((self.cache / "leftover.fw").exists())
+
+
 class LibraryTest(unittest.TestCase):
     def test_closure_skips_system_and_own_libraries(self):
         graph = {"libsigrok.so.4": ["libglib-2.0.so.0", "libzip.so.5", "libc.so.6"],

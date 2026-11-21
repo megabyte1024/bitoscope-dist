@@ -67,8 +67,22 @@ jobs:
           C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --needed --noconfirm base-devel mingw-w64-ucrt-x86_64-{gcc,autotools,pkgconf,tools-git,ntldd,glib2,libzip,zlib}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Restore kept sigrok firmware
+        uses: actions/cache/restore@v6
+        with:
+          path: work/firmware-cache
+          key: sigrok-firmware-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: sigrok-firmware-${{ runner.os }}-
+
       - name: Build zip, msi and exe
-        run: .\windows\build.ps1 -Target all -Manifest $env:MANIFEST -VcpkgRoot $env:VCPKG_PINNED
+        run: .\windows\build.ps1 -Target all -Manifest $env:MANIFEST -VcpkgRoot $env:VCPKG_PINNED -FirmwareDir work\firmware-cache
+
+      - name: Keep sigrok firmware
+        if: ${{ always() && hashFiles('work/firmware-cache/*.fw') != '' }}
+        uses: actions/cache/save@v6
+        with:
+          path: work/firmware-cache
+          key: sigrok-firmware-${{ runner.os }}-${{ github.run_id }}
 
       - name: Install and uninstall msi and exe
         run: .\windows\build.ps1 -Target install-test -Manifest $env:MANIFEST -VcpkgRoot $env:VCPKG_PINNED
@@ -110,8 +124,22 @@ jobs:
             libvulkan-dev libdbus-1-dev libwayland-dev libwayland-bin libxkbcommon-dev libx11-dev libxrandr-dev \
             libxinerama-dev libxcursor-dev libxi-dev libglib2.0-dev libzip-dev libusb-1.0-0-dev
 
+      - name: Restore kept sigrok firmware
+        uses: actions/cache/restore@v6
+        with:
+          path: work/firmware-cache
+          key: sigrok-firmware-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: sigrok-firmware-${{ runner.os }}-
+
       - name: Build AppImage
-        run: python3 linux/build.py all --manifest "$MANIFEST"
+        run: python3 linux/build.py all --manifest "$MANIFEST" --firmware-dir work/firmware-cache
+
+      - name: Keep sigrok firmware
+        if: ${{ always() && hashFiles('work/firmware-cache/*.fw') != '' }}
+        uses: actions/cache/save@v6
+        with:
+          path: work/firmware-cache
+          key: sigrok-firmware-${{ runner.os }}-${{ github.run_id }}
 
       - uses: actions/upload-artifact@v7
         with:
