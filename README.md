@@ -21,6 +21,9 @@ Packages are on the [Releases](../../releases) page:
 | `bitoscope-<version>-windows-x64.zip` | Windows 10 and 11, 64-bit: portable folder |
 | `bitoscope-<version>-linux-x86_64.AppImage` | Linux, x86-64 |
 
+The Windows setup program and the msi installer let you choose between installing for all users
+(needs administrator rights) and only for yourself (no administrator rights needed), and the folder.
+
 Nightly builds of the newest sources are on the pre-release "nightly", with `nightly` in place of
 the version in each file name. On Windows they install as a separate program, "Bitoscope Nightly",
 beside a release.

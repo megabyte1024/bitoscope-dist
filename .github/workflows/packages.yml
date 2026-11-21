@@ -87,6 +87,11 @@ jobs:
       - name: Install and uninstall msi and exe
         run: .\windows\build.ps1 -Target install-test -Manifest $env:MANIFEST -VcpkgRoot $env:VCPKG_PINNED
 
+      - name: Test setup dialogs
+        continue-on-error: true
+        timeout-minutes: 15
+        run: .\windows\test-ui.ps1
+
       - uses: actions/upload-artifact@v7
         with:
           name: windows-packages

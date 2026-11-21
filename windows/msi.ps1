@@ -2,6 +2,8 @@
 
 Set-StrictMode -Version 3
 
+. (Join-Path $PSScriptRoot 'msi-ui.ps1')
+
 if (-not ('BitoscopeDist.MsiNative' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -73,6 +75,21 @@ $script:MsiOpenCreate = [IntPtr]3
 $script:MsiOpenReadOnly = [IntPtr]0
 $script:MsiModifyInsert = 1
 $script:ShortNameCharacters = "A-Za-z0-9_\-!#$%&'()@^``{}~"
+
+function ConvertTo-MsiexecArguments([string[]]$Arguments) {
+    $quoted = foreach ($argument in $Arguments) {
+        if ($argument -match '^([A-Za-z_][A-Za-z0-9_.]*)=(.*)$') {
+            $name = $Matches[1]
+            $value = $Matches[2].TrimEnd('\')
+            if ($value -match '[\s"]') { "$name=`"$value`"" } else { "$name=$value" }
+        } elseif ($argument -match '[\s"]') {
+            "`"$argument`""
+        } else {
+            $argument
+        }
+    }
+    return $quoted -join ' '
+}
 
 function Assert-MsiCall([uint32]$Result, [string]$What) {
     if ($Result -ne 0) {
@@ -196,11 +213,15 @@ function New-MsiTables($Product, [object[]]$Files) {
         'Hotkey', 'Icon_', 'IconIndex', 'ShowCmd', 'WkDir') `
         @('s72', 's72', 'l128', 's72', 's72', 'S255', 'L255', 'I2', 'S72', 'I2', 'I2', 'S72') @('Shortcut')
 
-    $topNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $customAction = New-MsiTable 'CustomAction' @('Action', 'Type', 'Source', 'Target', 'ExtendedType') `
+        @('s72', 'i2', 'S72', 'S255', 'I4') @('Action')
     Add-MsiRow $directory @('TARGETDIR', $null, 'SourceDir')
-    Add-MsiRow $directory @('ProgramFiles64Folder', 'TARGETDIR', '.')
     Add-MsiRow $directory @('ProgramMenuFolder', 'TARGETDIR', '.')
-    Add-MsiRow $directory @('INSTALLFOLDER', 'ProgramFiles64Folder', (Get-MsiFileName $Product.Folder $topNames))
+    $topNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    Add-MsiRow $directory @('INSTALLFOLDER', 'TARGETDIR', (Get-MsiFileName $Product.Folder $topNames))
+    Add-MsiRow $customAction @('SetInstallFolderPerMachine', 51, 'INSTALLFOLDER', "[ProgramFiles64Folder]$($Product.Folder)\", $null)
+    Add-MsiRow $customAction @('SetInstallFolderPerUser', 51, 'INSTALLFOLDER', "[LocalAppDataFolder]Programs\$($Product.Folder)\", $null)
+    $perMachine = 'ALLUSERS=1 OR (ALLUSERS=2 AND Privileged AND NOT MSIINSTALLPERUSER)'
 
     $directoryIds = @{ '' = 'INSTALLFOLDER' }
     $namesIn = @{}
@@ -259,7 +280,7 @@ function New-MsiTables($Product, [object[]]$Files) {
             @('ProductLanguage', '1033'),
             @('Manufacturer', $Product.Manufacturer),
             @('UpgradeCode', $Product.UpgradeCode),
-            @('ALLUSERS', '1'),
+            @('ALLUSERS', '2'),
             @('ARPNOMODIFY', '1'),
             @('ARPURLINFOABOUT', $Product.Url),
             @('SecureCustomProperties', 'UPGRADEFOUND;NEWERFOUND'))) {
@@ -269,15 +290,21 @@ function New-MsiTables($Product, [object[]]$Files) {
     Add-MsiRow $upgrade @($Product.UpgradeCode, $Product.Version, $null, $null, 2, $null, 'NEWERFOUND')
     Add-MsiRow $launch @('NOT NEWERFOUND', "Newer $($Product.Name) is already installed.")
 
+    $ui = New-MsiUiTables $Product $perMachine
+    foreach ($pair in $ui.Properties) { Add-MsiRow $property $pair }
+    foreach ($row in $ui.CustomActions) { Add-MsiRow $customAction $row }
+    $folderActions = @(
+        @('SetInstallFolderPerMachine', 700, "NOT INSTALLFOLDER AND ($perMachine)"),
+        @('SetInstallFolderPerUser', 710, "NOT INSTALLFOLDER AND NOT ($perMachine)"))
     $sequences = @{
-        InstallExecuteSequence = @(
+        InstallExecuteSequence = $folderActions + @(
             @('FindRelatedProducts', 25), @('LaunchConditions', 100), @('CostInitialize', 800), @('FileCost', 900),
             @('CostFinalize', 1000), @('MigrateFeatureStates', 1200), @('InstallValidate', 1400),
             @('RemoveExistingProducts', 1401), @('InstallInitialize', 1500), @('ProcessComponents', 1600),
             @('UnpublishFeatures', 1800), @('RemoveShortcuts', 3200), @('RemoveFiles', 3500), @('InstallFiles', 4000),
             @('CreateShortcuts', 4500), @('RegisterUser', 6000), @('RegisterProduct', 6100), @('PublishFeatures', 6300),
             @('PublishProduct', 6400), @('InstallFinalize', 6600))
-        InstallUISequence = @(
+        InstallUISequence = $folderActions + $ui.Sequence + @(
             @('FindRelatedProducts', 25), @('LaunchConditions', 100), @('CostInitialize', 800), @('FileCost', 900),
             @('CostFinalize', 1000), @('MigrateFeatureStates', 1200), @('ExecuteAction', 1300))
         AdminExecuteSequence = @(
@@ -287,11 +314,11 @@ function New-MsiTables($Product, [object[]]$Files) {
         AdminUISequence = @(
             @('CostInitialize', 800), @('FileCost', 900), @('CostFinalize', 1000), @('ExecuteAction', 1300))
     }
-    $tables = @($directory, $component, $file, $feature, $featureComponents, $media, $property, $upgrade, $launch, $shortcut)
+    $tables = @($directory, $component, $file, $feature, $featureComponents, $media, $property, $upgrade, $launch, $shortcut, $customAction) + $ui.Tables
     foreach ($name in $sequences.Keys) {
         $table = New-MsiTable $name @('Action', 'Condition', 'Sequence') @('s72', 'S255', 'I2') @('Action')
         foreach ($action in $sequences[$name]) {
-            Add-MsiRow $table @($action[0], $null, $action[1])
+            Add-MsiRow $table @($action[0], $(if ($action.Count -gt 2) { $action[2] } else { $null }), $action[1])
         }
         $tables += $table
     }

@@ -145,6 +145,251 @@ Test-Case 'component ids differ between products and stay equal between versions
     } finally { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
+function New-UniqueTestProduct {
+    $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $product = New-TestProduct
+    $product.Name = "Bitoscope Test $id"
+    $product.Folder = "BitoscopeTest$id"
+    $product.UpgradeCode = '{' + [guid]::NewGuid().ToString().ToUpperInvariant() + '}'
+    $product.ProductCode = '{' + [guid]::NewGuid().ToString().ToUpperInvariant() + '}'
+    $product.PackageCode = '{' + [guid]::NewGuid().ToString().ToUpperInvariant() + '}'
+    return $product
+}
+
+function Find-UserUninstallEntry([string]$Name) {
+    $found = foreach ($hive in 'HKCU:', 'HKLM:') {
+        Get-ChildItem "$hive\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |
+            Where-Object { $_.GetValue('DisplayName') -eq $Name }
+    }
+    return @($found)
+}
+
+function Invoke-TestMsiexec([string[]]$Arguments) {
+    $process = Invoke-ProgramAndWait @{ FilePath = "$env:SystemRoot\System32\msiexec.exe"; ArgumentList = (ConvertTo-MsiexecArguments $Arguments) }
+    return $process.ExitCode
+}
+
+Test-Case 'msiexec arguments quote property values the way msiexec reads them' {
+    Assert-Equal 'INSTALLFOLDER="C:\a b\c" /qn /i "C:\x y\p.msi" PLAIN=1' (ConvertTo-MsiexecArguments @('INSTALLFOLDER=C:\a b\c\', '/qn', '/i', 'C:\x y\p.msi', 'PLAIN=1'))
+}
+
+Test-Case 'silent install without properties is per machine when elevated (not elevated: needs MSIINSTALLPERUSER=1)' {
+    $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $elevated) { Write-Host '      skipped: not elevated (a silent install then needs MSIINSTALLPERUSER=1, as the per-user tests give it)'; return }
+    $root = New-TempFolder
+    $product = New-UniqueTestProduct
+    $msi = Join-Path $root 'test.msi'
+    $userFolder = Join-Path $env:LOCALAPPDATA "Programs\$($product.Folder)"
+    $machineFolder = Join-Path $env:ProgramFiles $product.Folder
+    try {
+        New-TestStage (Join-Path $root 'stage')
+        New-MsiPackage -Stage (Join-Path $root 'stage') -OutputPath $msi -WorkFolder (Join-Path $root 'work') -Product $product
+        Assert-Equal 0 (Invoke-TestMsiexec @('/i', $msi, '/qn', '/l*v', (Join-Path $root 'install.log'))) 'silent install exit code'
+        $expected = if ($elevated) { $machineFolder } else { $userFolder }
+        $other = if ($elevated) { $userFolder } else { $machineFolder }
+        if (-not (Test-Path -LiteralPath (Join-Path $expected 'bitoscope_gui.exe'))) { throw "no bitoscope_gui.exe in $expected (elevated: $elevated)" }
+        if (Test-Path -LiteralPath $other) { throw "install also made $other" }
+        Assert-Equal 0 (Invoke-TestMsiexec @('/x', $msi, '/qn')) 'uninstall exit code'
+        if (Test-Path -LiteralPath (Join-Path $expected 'bitoscope_gui.exe')) { throw "uninstall left files in $expected" }
+    } finally {
+        [void](Invoke-TestMsiexec @('/x', $product.ProductCode, '/qn'))
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $userFolder -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $machineFolder -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Use-PerUserInstall([scriptblock]$Check, [string[]]$ExtraProperties = @()) {
+    $root = New-TempFolder
+    $product = New-UniqueTestProduct
+    $msi = Join-Path $root 'test.msi'
+    $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$($product.Name).lnk"
+    try {
+        New-TestStage (Join-Path $root 'stage')
+        New-MsiPackage -Stage (Join-Path $root 'stage') -OutputPath $msi -WorkFolder (Join-Path $root 'work') -Product $product
+        Assert-Equal 0 (Invoke-TestMsiexec (@('/i', $msi, '/qn', 'MSIINSTALLPERUSER=1', '/l*v', (Join-Path $root 'install.log')) + $ExtraProperties)) 'per-user install exit code'
+        & $Check $root $product $shortcut
+        Assert-Equal 0 (Invoke-TestMsiexec @('/x', $msi, '/qn', '/l*v', (Join-Path $root 'uninstall.log'))) 'uninstall exit code'
+        Assert-Equal 0 @(Find-UserUninstallEntry $product.Name).Count 'uninstall entries after uninstall'
+        if (Test-Path -LiteralPath $shortcut) { throw "uninstall left $shortcut" }
+        $defaultFolder = Join-Path $env:LOCALAPPDATA "Programs\$($product.Folder)"
+        if (@(Get-ChildItem -LiteralPath $defaultFolder -Recurse -File -Force -ErrorAction SilentlyContinue).Count -gt 0) { throw "uninstall left files in $defaultFolder" }
+    } finally {
+        [void](Invoke-TestMsiexec @('/x', $product.ProductCode, '/qn'))
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA "Programs\$($product.Folder)") -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'msi is dual-purpose and sets default folder for each scope before costing' {
+    $root = New-TempFolder
+    try {
+        New-TestStage $root
+        $model = New-MsiTables (New-TestProduct) (Get-StageFiles $root)
+        function Get-Table($name) { return @($model.Tables | Where-Object { $_.Name -eq $name })[0] }
+        $properties = @{}; foreach ($row in (Get-Table 'Property').Rows) { $properties[$row[0]] = $row[1] }
+        Assert-Equal '2' $properties['ALLUSERS'] 'ALLUSERS'
+        $folder = @((Get-Table 'Directory').Rows | Where-Object { $_[0] -eq 'INSTALLFOLDER' })[0]
+        Assert-Equal @('INSTALLFOLDER', 'TARGETDIR', 'BITOSC~1|Bitoscope') $folder 'INSTALLFOLDER row'
+        $actions = @{}; foreach ($row in (Get-Table 'CustomAction').Rows) { $actions[$row[0]] = $row }
+        Assert-Equal '[ProgramFiles64Folder]Bitoscope\' $actions['SetInstallFolderPerMachine'][3] 'per-machine folder'
+        Assert-Equal '[LocalAppDataFolder]Programs\Bitoscope\' $actions['SetInstallFolderPerUser'][3] 'per-user folder'
+        foreach ($sequence in 'InstallUISequence', 'InstallExecuteSequence') {
+            $rows = @((Get-Table $sequence).Rows)
+            $costing = @($rows | Where-Object { $_[0] -eq 'CostInitialize' })[0][2]
+            foreach ($action in 'SetInstallFolderPerMachine', 'SetInstallFolderPerUser') {
+                $row = @($rows | Where-Object { $_[0] -eq $action })
+                if ($row.Count -ne 1) { throw "$sequence has $($row.Count) rows for $action" }
+                if ($row[0][2] -ge $costing) { throw "$action runs at $($row[0][2]) in $sequence, not before CostInitialize ($costing)" }
+            }
+        }
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+function Get-UiModel {
+    $root = New-TempFolder
+    try {
+        New-TestStage $root
+        $model = New-MsiTables (New-TestProduct) (Get-StageFiles $root)
+        $tables = @{}; foreach ($table in $model.Tables) { $tables[$table.Name] = $table }
+        return $tables
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'msi dialogs: every reference between dialogs, controls, events, actions and sequence exists' {
+    $t = Get-UiModel
+    foreach ($name in 'Dialog', 'Control', 'ControlEvent', 'RadioButton', 'TextStyle', 'EventMapping') { if (-not $t.ContainsKey($name)) { throw "no $name table" } }
+    $dialogs = @{}; foreach ($row in $t['Dialog'].Rows) { $dialogs[$row[0]] = $row }
+    foreach ($name in 'ScopeDlg', 'FolderDlg', 'BrowseDlg', 'ProgressDlg', 'ExitDialog', 'FatalError', 'UserExit', 'CancelDlg') { if (-not $dialogs.ContainsKey($name)) { throw "no dialog $name" } }
+    $controls = @{}; foreach ($row in $t['Control'].Rows) { $controls["$($row[0])/$($row[1])"] = $row }
+    foreach ($dialog in $dialogs.Values) {
+        foreach ($index in 7, 8, 9) {
+            if ($null -ne $dialog[$index] -and -not $controls.ContainsKey("$($dialog[0])/$($dialog[$index])")) { throw "dialog $($dialog[0]) names missing control $($dialog[$index])" }
+        }
+        if ($null -eq $dialog[7]) { throw "dialog $($dialog[0]) has no first control" }
+    }
+    foreach ($control in $controls.Values) {
+        if (-not $dialogs.ContainsKey($control[0])) { throw "control $($control[1]) belongs to missing dialog $($control[0])" }
+        if ($null -ne $control[10] -and -not $controls.ContainsKey("$($control[0])/$($control[10])")) { throw "control $($control[0])/$($control[1]) has missing next control $($control[10])" }
+    }
+    $actions = @{}; foreach ($row in $t['CustomAction'].Rows) { $actions[$row[0]] = $row }
+    $directories = @{}; foreach ($row in $t['Directory'].Rows) { $directories[$row[0]] = $row }
+    foreach ($event in $t['ControlEvent'].Rows) {
+        if (-not $controls.ContainsKey("$($event[0])/$($event[1])")) { throw "event on missing control $($event[0])/$($event[1])" }
+        if ($event[2] -eq 'SetTargetPath' -and -not ($directories.ContainsKey($event[3]) -or $event[3] -eq '[_BrowseProperty]')) {
+            throw "SetTargetPath on $($event[0])/$($event[1]) has argument '$($event[3])': it must be name of directory (INSTALLFOLDER) or [_BrowseProperty], error 2872 otherwise"
+        }
+        switch ($event[2]) {
+            { $_ -in 'NewDialog', 'SpawnDialog' } { if (-not $dialogs.ContainsKey($event[3])) { throw "$($event[2]) of missing dialog $($event[3])" } }
+            'DoAction' { if (-not $actions.ContainsKey($event[3])) { throw "DoAction of missing custom action $($event[3])" } }
+            'EndDialog' { if ($event[3] -notin 'Return', 'Exit', 'Retry', 'Ignore') { throw "EndDialog with $($event[3])" } }
+        }
+    }
+    foreach ($mapping in $t['EventMapping'].Rows) { if (-not $controls.ContainsKey("$($mapping[0])/$($mapping[1])")) { throw "event mapping on missing control $($mapping[0])/$($mapping[1])" } }
+    $styles = @{}; foreach ($row in $t['TextStyle'].Rows) { $styles[$row[0]] = $row }
+    foreach ($control in $controls.Values) { foreach ($m in [regex]::Matches([string]$control[9], '\{\\(\w+)\}')) { if (-not $styles.ContainsKey($m.Groups[1].Value)) { throw "control $($control[0])/$($control[1]) uses missing text style $($m.Groups[1].Value)" } } }
+    $sequence = @{}; foreach ($row in $t['InstallUISequence'].Rows) { $sequence[$row[0]] = $row[2] }
+    foreach ($name in $dialogs.Keys) {
+        if ($name -in 'ScopeDlg', 'ProgressDlg', 'ExitDialog', 'FatalError', 'UserExit') { if (-not $sequence.ContainsKey($name)) { throw "dialog $name is not in InstallUISequence" } }
+        elseif ($sequence.ContainsKey($name)) { throw "dialog $name must be opened by an event, not by the sequence" }
+    }
+    if (-not ($sequence['ScopeDlg'] -lt $sequence['ProgressDlg'] -and $sequence['ProgressDlg'] -lt $sequence['ExecuteAction'])) { throw 'order must be ScopeDlg, ProgressDlg, ExecuteAction' }
+    Assert-Equal @(-1, -2, -3) @($sequence['ExitDialog'], $sequence['UserExit'], $sequence['FatalError']) 'terminal dialog sequence numbers'
+    $property = @{}; foreach ($row in $t['Property'].Rows) { $property[$row[0]] = $row[1] }
+    if (-not $styles.ContainsKey($property['DefaultUIFont'])) { throw "DefaultUIFont is $($property['DefaultUIFont'])" }
+}
+
+Test-Case 'msi dialogs: scope radio buttons and texts' {
+    $t = Get-UiModel
+    $group = @($t['Control'].Rows | Where-Object { $_[0] -eq 'ScopeDlg' -and $_[2] -eq 'RadioButtonGroup' })
+    Assert-Equal 1 $group.Count 'radio groups on ScopeDlg'
+    Assert-Equal 'INSTALLSCOPE' $group[0][8] 'radio group property'
+    $radios = @($t['RadioButton'].Rows | Where-Object { $_[0] -eq 'INSTALLSCOPE' } | Sort-Object { $_[1] })
+    Assert-Equal @('perUser', 'perMachine') @($radios | ForEach-Object { $_[2] }) 'radio values in order'
+    $texts = @($t['Control'].Rows | ForEach-Object { $_[9] }) + @($radios | ForEach-Object { $_[7] })
+    foreach ($text in $texts) { if ($null -ne $text -and $text -match '(?i)\b(the|a|an)\b') { throw "text with article: $text" } }
+}
+
+Test-Case 'msi dialogs: Next sets scope and default folder, Install checks folder' {
+    $t = Get-UiModel
+    function Get-Events($dialog, $control) { return , @($t['ControlEvent'].Rows | Where-Object { $_[0] -eq $dialog -and $_[1] -eq $control } | Sort-Object { $_[5] }) }
+    function Find-Event($events, $name, $argument, $condition) { return , @($events | Where-Object { $_[2] -eq $name -and $_[3] -eq $argument -and $_[4] -eq $condition }) }
+    $next = Get-Events 'ScopeDlg' 'Next'
+    foreach ($expected in @(
+            @('[ALLUSERS]', '1', 'INSTALLSCOPE="perMachine"'), @('[MSIINSTALLPERUSER]', '{}', 'INSTALLSCOPE="perMachine"'),
+            @('[MSIINSTALLPERUSER]', '1', 'INSTALLSCOPE="perUser"'),
+            @('DoAction', 'SetInstallFolderPerMachine', 'INSTALLSCOPE="perMachine"'), @('DoAction', 'SetInstallFolderPerUser', 'INSTALLSCOPE="perUser"'),
+            @('NewDialog', 'FolderDlg', '1'))) {
+        if ((Find-Event $next $expected[0] $expected[1] $expected[2]).Count -ne 1) { throw "ScopeDlg Next lacks $($expected -join ' | ')" }
+    }
+    $install = Get-Events 'FolderDlg' 'Install'
+    $check = Find-Event $install 'SetTargetPath' 'INSTALLFOLDER' '1'; $end = Find-Event $install 'EndDialog' 'Return' '1'
+    if ($check.Count -ne 1 -or $end.Count -ne 1 -or $check[0][5] -ge $end[0][5]) { throw 'FolderDlg Install must check folder (SetTargetPath) before it ends dialog' }
+    $browse = Get-Events 'FolderDlg' 'Browse'
+    if ((Find-Event $browse '[_BrowseProperty]' 'INSTALLFOLDER' '1').Count -ne 1 -or (Find-Event $browse 'SpawnDialog' 'BrowseDlg' '1').Count -ne 1) { throw 'FolderDlg Browse must set _BrowseProperty and open BrowseDlg' }
+}
+
+Test-Case 'msi installs per user into user folder without administrator and uninstalls cleanly' {
+    Use-PerUserInstall {
+        param($root, $product, $shortcut)
+        $folder = Join-Path $env:LOCALAPPDATA "Programs\$($product.Folder)"
+        foreach ($relative in 'bitoscope_gui.exe', 'drivers\demo.exe', 'drivers\sigrok-firmware\fx2lafw-a.fw') {
+            if (-not (Test-Path -LiteralPath (Join-Path $folder $relative))) { throw "per-user install has no $relative in $folder" }
+        }
+        Assert-Equal 1 @(Find-UserUninstallEntry $product.Name).Count 'uninstall entries of current user'
+        if (-not (Test-Path -LiteralPath $shortcut)) { throw "no Start menu entry $shortcut" }
+    }
+    if (Test-Path (Join-Path $env:LOCALAPPDATA 'Programs\BitoscopeTest*')) { throw 'test left a folder in Programs' }
+}
+
+Test-Case 'two products with same files install side by side per user and uninstall independently' {
+    $root = New-TempFolder
+    $first = New-UniqueTestProduct
+    $second = New-UniqueTestProduct
+    $folders = @{}; foreach ($product in $first, $second) { $folders[$product.Name] = Join-Path $env:LOCALAPPDATA "Programs\$($product.Folder)" }
+    try {
+        New-TestStage (Join-Path $root 'stage')
+        foreach ($item in @(@($first, 'first.msi'), @($second, 'second.msi'))) {
+            New-MsiPackage -Stage (Join-Path $root 'stage') -OutputPath (Join-Path $root $item[1]) -WorkFolder (Join-Path $root "work-$($item[1])") -Product $item[0]
+            Assert-Equal 0 (Invoke-TestMsiexec @('/i', (Join-Path $root $item[1]), '/qn', 'MSIINSTALLPERUSER=1')) "install of $($item[1])"
+        }
+        foreach ($product in $first, $second) {
+            foreach ($relative in 'bitoscope_gui.exe', 'drivers\demo.exe', 'drivers\sigrok-firmware\fx2lafw-a.fw') {
+                if (-not (Test-Path -LiteralPath (Join-Path $folders[$product.Name] $relative))) { throw "$($product.Name) has no $relative" }
+            }
+        }
+        foreach ($product in $first, $second) { if (-not (Test-Path -LiteralPath (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$($product.Name).lnk"))) { throw "no Start menu entry of $($product.Name)" } }
+        Assert-Equal 0 (Invoke-TestMsiexec @('/x', (Join-Path $root 'first.msi'), '/qn')) 'uninstall of first'
+        if (Test-Path -LiteralPath (Join-Path $folders[$first.Name] 'bitoscope_gui.exe')) { throw 'first product still has files after its uninstall' }
+        foreach ($relative in 'bitoscope_gui.exe', 'drivers\demo.exe') {
+            if (-not (Test-Path -LiteralPath (Join-Path $folders[$second.Name] $relative))) { throw "uninstall of first removed $relative of second" }
+        }
+        if (Test-Path -LiteralPath (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$($first.Name).lnk")) { throw 'uninstall of first left its Start menu entry' }
+        if (-not (Test-Path -LiteralPath (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$($second.Name).lnk"))) { throw 'uninstall of first removed Start menu entry of second' }
+        Assert-Equal 0 (Invoke-TestMsiexec @('/x', (Join-Path $root 'second.msi'), '/qn')) 'uninstall of second'
+        if (Test-Path -LiteralPath (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$($second.Name).lnk")) { throw 'uninstall of second left its Start menu entry' }
+    } finally {
+        foreach ($product in $first, $second) {
+            [void](Invoke-TestMsiexec @('/x', $product.ProductCode, '/qn'))
+            Remove-Item -LiteralPath $folders[$product.Name] -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$($product.Name).lnk") -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'INSTALLFOLDER on the command line decides the folder' {
+    $target = Join-Path (New-TempFolder) 'chosen folder'
+    try {
+        Use-PerUserInstall {
+            param($root, $product, $shortcut)
+            if (-not (Test-Path -LiteralPath (Join-Path $target 'bitoscope_gui.exe'))) { throw "no bitoscope_gui.exe in $target" }
+            if (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA "Programs\$($product.Folder)")) { throw 'default folder was used as well' }
+        } @("INSTALLFOLDER=$target\")
+        if (@(Get-ChildItem -LiteralPath $target -Recurse -File -ErrorAction SilentlyContinue).Count -gt 0) { throw "uninstall left files in $target" }
+    } finally { Remove-Item -LiteralPath (Split-Path -Parent $target) -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 Test-Case 'msi tables need program' {
     $root = New-TempFolder
     try {
@@ -280,6 +525,13 @@ Test-Case 'newer download replaces older cache completely' {
         Assert-Equal 'new' (Read-Firmware $cache)
         Assert-Equal $false (Test-Path "$cache\leftover.fw") 'leftover firmware file'
     } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'SED quiet commands: standard user per user, administrator per machine only when elevated' {
+    $text = ConvertTo-SedText 'C:\o\a.msi' 'C:\o\a.exe' 'A'
+    if ($text -notmatch '(?m)^UserQuietInstCmd=msiexec\.exe /i a\.msi /qn MSIINSTALLPERUSER=1\r?$') { throw "UserQuietInstCmd line wrong:`n$text" }
+    $admin = 'AdminQuietInstCmd=cmd /c fltmc >nul 2>&1 & if errorlevel 1 (msiexec.exe /i a.msi /qn MSIINSTALLPERUSER=1) else msiexec.exe /i a.msi /qn'
+    if ($text -notmatch ('(?m)^' + [regex]::Escape($admin) + '\r?$')) { throw "AdminQuietInstCmd line wrong:`n$text" }
 }
 
 Test-Case 'arguments are quoted as Windows programs read them' {

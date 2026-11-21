@@ -5,7 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -73,6 +73,48 @@ class NightlyTest(unittest.TestCase):
         self.assertEqual(build.base_name(release), f"bitoscope-{release.version}")
         nightly = build.Manifest("0.4.26324", release.repos, True)
         self.assertEqual(build.base_name(nightly), "bitoscope-nightly")
+
+
+class NightlyNotesTest(unittest.TestCase):
+    def nightly(self, commits=None):
+        manifest = build.parse_manifest(MANIFEST)
+        heads = {repo.url: ("main", (commits or {}).get(repo.name, f"{index}" * 40))
+                 for index, repo in enumerate(manifest.repos.values(), 1)}
+        return build.parse_manifest(json.dumps(build.nightly_manifest(manifest, lambda url: heads[url], date(2026, 11, 21))))
+
+    def notes(self, manifest):
+        return build.nightly_notes(manifest, datetime(2026, 11, 21, 2, 5, tzinfo=timezone.utc))
+
+    def test_notes_name_version_time_and_every_commit(self):
+        notes = self.notes(self.nightly())
+        self.assertIn("Bitoscope Nightly 0.4.26325, built 2026-11-21 02:05 UTC", notes)
+        for index, name in enumerate(build.REPOS.values(), 1):
+            self.assertIn(f"- {name} main ({str(index) * 40})", notes)
+
+    def test_commits_are_read_back_from_notes(self):
+        manifest = self.nightly()
+        self.assertEqual(build.commits_in_notes(self.notes(manifest)),
+                         {name: repo.commit for name, repo in manifest.repos.items()})
+
+    def test_same_commits_mean_nothing_changed(self):
+        manifest = self.nightly()
+        self.assertFalse(build.nightly_changed(manifest, self.notes(manifest)))
+
+    def test_one_new_commit_means_changed(self):
+        notes = self.notes(self.nightly())
+        newer = self.nightly({"bitoscope-fnirsi-dla": "a" * 40})
+        self.assertTrue(build.nightly_changed(newer, notes))
+
+    def test_no_earlier_notes_mean_changed(self):
+        manifest = self.nightly()
+        self.assertTrue(build.nightly_changed(manifest, None))
+        self.assertTrue(build.nightly_changed(manifest, ""))
+        self.assertTrue(build.nightly_changed(manifest, "Some other text\n"))
+
+    def test_notes_missing_one_repo_mean_changed(self):
+        manifest = self.nightly()
+        notes = "\n".join(line for line in self.notes(manifest).splitlines() if "bitoscope-sigrok-bridge" not in line)
+        self.assertTrue(build.nightly_changed(manifest, notes))
 
 
 class RetryTest(unittest.TestCase):

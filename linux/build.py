@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-TARGETS = ("all", "fetch", "build", "stage", "package", "nightly-manifest")
+TARGETS = ("all", "fetch", "build", "stage", "package", "nightly-manifest", "nightly-notes", "nightly-changed")
 
 REPOS = {"main": "bitoscope", "dla": "bitoscope-fnirsi-dla", "bridge": "bitoscope-sigrok-bridge"}
 
@@ -153,6 +153,25 @@ def remote_head(url: str) -> tuple[str, str]:
     if result.returncode != 0:
         raise DistError(f"git ls-remote {url} failed:\n{result.stderr.strip()}")
     return parse_head(result.stdout)
+
+
+NOTES_COMMIT_LINE = re.compile(r"^- (\S+) \S+ \(([0-9a-f]{40})\)\s*$", re.MULTILINE)
+
+
+def nightly_notes(manifest: Manifest, built: datetime) -> str:
+    lines = [f"Bitoscope Nightly {manifest.version}, built {built:%Y-%m-%d %H:%M} UTC from newest commits:", ""]
+    lines += [f"- {repo.name} {repo.branch} ({repo.commit})" for repo in manifest.repos.values()]
+    lines += ["", "Installs as separate program Bitoscope Nightly, beside release."]
+    return "\n".join(lines) + "\n"
+
+
+def commits_in_notes(notes: str) -> dict[str, str]:
+    return {name: commit for name, commit in NOTES_COMMIT_LINE.findall(notes)}
+
+
+def nightly_changed(manifest: Manifest, notes: str | None) -> bool:
+    earlier = commits_in_notes(notes or "")
+    return any(earlier.get(repo.name) != repo.commit for repo in manifest.repos.values())
 
 
 def nightly_manifest(manifest: Manifest, head_of, day: date) -> dict:
@@ -658,11 +677,13 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--tools-dir", type=Path, default=Path.home() / ".cache" / "bitoscope-dist-tools")
     parser.add_argument("--nightly-manifest-out", type=Path, default=root / "nightly-manifest.json",
                         help="target nightly-manifest: file to write (default: %(default)s)")
+    parser.add_argument("--previous-notes", type=Path, default=None,
+                        help="target nightly-changed: file with the notes of the earlier nightly (missing: changed)")
     parser.add_argument("--firmware-dir", type=Path, default=None,
                         help="folder that keeps the last downloaded sigrok firmware: used when the download fails, "
                              "refilled after a download")
     arguments = parser.parse_args(argv)
-    for name in ("manifest", "work", "out", "tools_dir", "nightly_manifest_out", "firmware_dir"):
+    for name in ("manifest", "work", "out", "tools_dir", "nightly_manifest_out", "firmware_dir", "previous_notes"):
         value = getattr(arguments, name)
         if value is not None:
             setattr(arguments, name, value.expanduser().resolve())
@@ -679,6 +700,14 @@ def main(argv: list[str] | None = None) -> int:
             for repo in data["repos"]:
                 print(f"{repo['name']}: {repo['branch']} at {repo['commit']}")
             print(f"Nightly manifest {arguments.nightly_manifest_out}, version {data['version']}.")
+            return 0
+        if arguments.target == "nightly-notes":
+            print(nightly_notes(manifest, datetime.now(timezone.utc)), end="")
+            return 0
+        if arguments.target == "nightly-changed":
+            earlier = arguments.previous_notes
+            notes = earlier.read_text(encoding="utf-8") if earlier is not None and earlier.is_file() else None
+            print(f"changed={'true' if nightly_changed(manifest, notes) else 'false'}")
             return 0
         if sys.platform != "linux":
             raise DistError(f"Linux only, not {sys.platform}")
