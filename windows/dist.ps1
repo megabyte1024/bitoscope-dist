@@ -66,6 +66,14 @@ function ConvertTo-ArgumentText([string[]]$Arguments) {
     return $quoted -join ' '
 }
 
+function Invoke-ProgramAndWait([hashtable]$StartArguments) {
+    $StartArguments.PassThru = $true
+    $process = Start-Process @StartArguments
+    [void]$process.Handle
+    $process.WaitForExit()
+    return $process
+}
+
 $script:StepNumber = 0
 
 function Invoke-Step {
@@ -96,11 +104,10 @@ function Invoke-Step {
             RedirectStandardOutput = "$log.out.txt"
             RedirectStandardError = "$log.err.txt"
             NoNewWindow = $true
-            Wait = $true
             PassThru = $true
         }
         if ($argumentText -ne '') { $startArguments.ArgumentList = $argumentText }
-        $process = Start-Process @startArguments
+        $process = Invoke-ProgramAndWait $startArguments
     } finally {
         foreach ($name in $saved.Keys) {
             [Environment]::SetEnvironmentVariable($name, $saved[$name])
@@ -316,14 +323,19 @@ function Invoke-PluginListing([string]$Checker, [string]$HomeFolder, [int]$Timeo
     return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $stdout.Result + $stderr.Result }
 }
 
-function Test-Distribution([string]$Root, [string]$Checker, [string]$Dumpbin, [string]$HomeFolder) {
-    $problems = @(Find-MissingDlls $Root "$env:SystemRoot\System32" (New-ImportsReader $Dumpbin))
+function Get-DistributionProblems([string]$Root, [string]$SystemFolder, [scriptblock]$ImportsOf) {
+    $problems = @(foreach ($problem in (Find-MissingDlls $Root $SystemFolder $ImportsOf)) { $problem })
     $gui = Join-Path $Root 'bitoscope_gui.exe'
     if (-not (Test-Path -LiteralPath $gui)) { $problems += 'bitoscope_gui.exe is missing' }
     elseif ([System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($gui)).Contains('BITOSCOPE_TEST_INPUT')) {
         $problems += 'bitoscope_gui.exe was built with test hook'
     }
     if (Test-Path -LiteralPath (Join-Path $Root 'bitoscope_cli.exe')) { $problems += 'bitoscope_cli.exe is in distribution' }
+    return , $problems
+}
+
+function Test-Distribution([string]$Root, [string]$Checker, [string]$Dumpbin, [string]$HomeFolder) {
+    $problems = Get-DistributionProblems $Root "$env:SystemRoot\System32" (New-ImportsReader $Dumpbin)
     if ($problems.Count -gt 0) { throw "distribution in $Root failed checks:`n  $($problems -join "`n  ")" }
 
     $placed = Join-Path $Root 'bitoscope_cli.exe'

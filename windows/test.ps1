@@ -173,6 +173,23 @@ Test-Case 'SED starts msi without quotes and refuses names with spaces' {
     Assert-Throws { ConvertTo-SedText 'C:\o\a b.msi' 'C:\o\a.exe' 'A' } 'no spaces'
 }
 
+Test-Case 'step does not wait for process its program leaves behind' {
+    $root = New-TempFolder
+    $marker = 'bitoscope-dist-leftover-' + [guid]::NewGuid().ToString('N')
+    try {
+        $inner = "Start-Sleep -Seconds 20; '$marker'"
+        $outer = "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-Command',`"$inner`""
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        Invoke-Step 'Leave process behind' 'powershell.exe' @('-NoProfile', '-Command', $outer) -Logs $root
+        $seconds = $watch.Elapsed.TotalSeconds
+        if ($seconds -gt 10) { throw "step took $($seconds.ToString('0.0', [System.Globalization.CultureInfo]::InvariantCulture)) s: it waited for leftover process" }
+    } finally {
+        Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match $marker } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'arguments are quoted as Windows programs read them' {
     Assert-Equal 'a "b c" "" "d\"e" "f g\\"' (ConvertTo-ArgumentText @('a', 'b c', '', 'd"e', 'f g\'))
 }
@@ -235,6 +252,22 @@ Test-Case 'missing DLL is named, DLL beside, API set and system DLL are not' {
         Assert-Equal @('drivers\a.exe needs VCRUNTIME140.dll, found nowhere it would be loaded from',
             'drivers\a.exe needs gone.dll, found nowhere it would be loaded from') `
             (Find-MissingDlls "$root\stage\" "$root\system" $imports)
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'clean distribution has no problems, broken one names each' {
+    $root = New-TempFolder
+    try {
+        New-Item -ItemType Directory -Path "$root\stage\drivers", "$root\system" | Out-Null
+        [System.IO.File]::WriteAllText("$root\stage\bitoscope_gui.exe", 'gui')
+        [System.IO.File]::WriteAllText("$root\stage\drivers\demo.exe", 'demo')
+        [System.IO.File]::WriteAllText("$root\system\kernel32.dll", '')
+        $clean = { param($path) @('KERNEL32.dll') }
+        Assert-Equal 0 (Get-DistributionProblems "$root\stage" "$root\system" $clean).Count 'problems of clean distribution'
+        $broken = { param($path) if ($path -like '*demo.exe') { @('gone.dll') } else { @('KERNEL32.dll') } }
+        [System.IO.File]::WriteAllText("$root\stage\bitoscope_cli.exe", 'cli')
+        Assert-Equal @('drivers\demo.exe needs gone.dll, found nowhere it would be loaded from', 'bitoscope_cli.exe is in distribution') `
+            (Get-DistributionProblems "$root\stage" "$root\system" $broken) 'problems of broken distribution'
     } finally { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 

@@ -217,7 +217,9 @@ function Invoke-Package($Data) {
             -FriendlyName "$($Naming.Name) $($Data.version) Setup"
         if ('msi' -notin $Formats) { Remove-Item -LiteralPath $msi -Force }
     }
-    Get-ChildItem -LiteralPath $Out -File | ForEach-Object { Write-Host ("    {0}  {1:N0} bytes" -f $_.Name, $_.Length) }
+    Get-ChildItem -LiteralPath $Out -File | ForEach-Object {
+        Write-Host ("    {0}  {1} bytes" -f $_.Name, $_.Length.ToString('N0', [System.Globalization.CultureInfo]::InvariantCulture).Replace(',', "'"))
+    }
 }
 
 function Test-Installed([string]$Stage, [string]$Folder, [string]$Checker, [string]$Dumpbin, [string]$What) {
@@ -230,7 +232,7 @@ function Test-Installed([string]$Stage, [string]$Folder, [string]$Checker, [stri
 }
 
 function Invoke-Msiexec([string[]]$Arguments, [string]$What) {
-    $process = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList (ConvertTo-ArgumentText $Arguments) -Wait -PassThru
+    $process = Invoke-ProgramAndWait @{ FilePath = "$env:SystemRoot\System32\msiexec.exe"; ArgumentList = (ConvertTo-ArgumentText $Arguments) }
     if ($process.ExitCode -ne 0) { throw "$What failed: msiexec exited $($process.ExitCode)" }
 }
 
@@ -259,7 +261,7 @@ function Invoke-InstallTest($Data) {
     }
     if (Test-Path -LiteralPath $exe) {
         Write-Host "==> Install $exe"
-        $process = Start-Process -FilePath $exe -ArgumentList '/Q' -Wait -PassThru
+        $process = Invoke-ProgramAndWait @{ FilePath = $exe; ArgumentList = '/Q' }
         if ($process.ExitCode -ne 0) { throw "setup program exited $($process.ExitCode)" }
         Test-Installed $stage $folder $checker $vs.Dumpbin 'setup program'
         Write-Host "==> Uninstall $($Naming.Name) installed by setup program"

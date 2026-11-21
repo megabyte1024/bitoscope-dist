@@ -61,8 +61,12 @@ function New-IExpressPackage {
     $sed = Join-Path $WorkFolder 'setup.sed'
     [System.IO.File]::WriteAllText($sed, (ConvertTo-SedText $MsiPath $OutputPath $FriendlyName), [System.Text.Encoding]::ASCII)
     if (Test-Path -LiteralPath $OutputPath) { Remove-Item -LiteralPath $OutputPath -Force }
-    $process = Start-Process -FilePath "$env:SystemRoot\System32\iexpress.exe" -ArgumentList '/N /Q setup.sed' `
-        -WorkingDirectory $WorkFolder -Wait -PassThru -NoNewWindow
+    $process = Invoke-ProgramAndWait @{
+        FilePath = "$env:SystemRoot\System32\iexpress.exe"
+        ArgumentList = '/N /Q setup.sed'
+        WorkingDirectory = $WorkFolder
+        NoNewWindow = $true
+    }
     if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $OutputPath)) {
         throw "iexpress failed (exit $($process.ExitCode)) for $sed"
     }
