@@ -194,6 +194,11 @@ function Get-Imports([string]$Dumpbin, [string]$Path) {
     return , (ConvertFrom-DumpbinDependents ($output -join "`n"))
 }
 
+function New-ImportsReader([string]$Dumpbin) {
+    $quoted = "'" + $Dumpbin.Replace("'", "''") + "'"
+    return [scriptblock]::Create("param(`$path) Get-Imports $quoted `$path")
+}
+
 function Get-Binaries([string]$Root) {
     return @(Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' } |
         Sort-Object FullName)
@@ -312,8 +317,7 @@ function Invoke-PluginListing([string]$Checker, [string]$HomeFolder, [int]$Timeo
 }
 
 function Test-Distribution([string]$Root, [string]$Checker, [string]$Dumpbin, [string]$HomeFolder) {
-    $importsOf = { param($path) Get-Imports $Dumpbin $path }.GetNewClosure()
-    $problems = @(Find-MissingDlls $Root "$env:SystemRoot\System32" $importsOf)
+    $problems = @(Find-MissingDlls $Root "$env:SystemRoot\System32" (New-ImportsReader $Dumpbin))
     $gui = Join-Path $Root 'bitoscope_gui.exe'
     if (-not (Test-Path -LiteralPath $gui)) { $problems += 'bitoscope_gui.exe is missing' }
     elseif ([System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($gui)).Contains('BITOSCOPE_TEST_INPUT')) {

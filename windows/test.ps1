@@ -199,6 +199,29 @@ File Type: EXECUTABLE IMAGE
     Assert-Equal @('libusb-1.0.dll', 'KERNEL32.dll', 'WINMM.dll') (ConvertFrom-DumpbinDependents $text)
 }
 
+Test-Case 'imports reader works in script started as .\script from another command' {
+    $root = New-TempFolder
+    try {
+        $dist = Join-Path $PSScriptRoot 'dist.ps1'
+        $script = @"
+[CmdletBinding()]
+param()
+`$ErrorActionPreference = 'Stop'
+. '$($dist.Replace("'", "''"))'
+function Invoke-Reader {
+    `$reader = New-ImportsReader (Get-VisualStudio).Dumpbin
+    `$names = foreach (`$name in (& `$reader "`$env:SystemRoot\System32\cmd.exe")) { `$name }
+    `$names -join ','
+}
+Invoke-Reader
+"@
+        [System.IO.File]::WriteAllText((Join-Path $root 'reader.ps1'), $script)
+        Push-Location $root
+        try { $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '.\reader.ps1' 2>&1 } finally { Pop-Location }
+        if (($output -join ' ') -notmatch '(?i)^[\w.-]+\.dll(,[\w.-]+\.dll)+$') { throw "imports of cmd.exe through reader: $($output -join ' ')" }
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
 Test-Case 'missing DLL is named, DLL beside, API set and system DLL are not' {
     $root = New-TempFolder
     try {

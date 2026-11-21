@@ -163,8 +163,7 @@ function Invoke-Stage($Data) {
     Write-Sources $Data $licenses $vcpkg
 
     Write-Host '==> Add Visual C++ runtime beside programs'
-    $importsOf = { param($path) Get-Imports $vs.Dumpbin $path }.GetNewClosure()
-    $added = Add-VisualCppRuntime $stage $vs.Runtime $importsOf
+    $added = Add-VisualCppRuntime $stage $vs.Runtime (New-ImportsReader $vs.Dumpbin)
     Write-Host "    $($added.Count) files from $($vs.Runtime)"
 
     Test-Distribution $stage (Join-Path $checker 'bitoscope_cli.exe') $vs.Dumpbin (Join-Path $Work 'home')
