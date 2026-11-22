@@ -239,7 +239,9 @@ function Test-Installed([string]$Stage, [string]$Folder, [string]$Checker, [stri
     $found = @(Get-ChildItem -LiteralPath $Folder -Recurse -File -ErrorAction SilentlyContinue).Count
     if ($found -ne $expected) {
         $perUser = @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA "Programs\$($Naming.Name)") -Recurse -File -ErrorAction SilentlyContinue).Count
-        throw "$What installed $found files into $Folder, distribution has $expected (per-user folder holds $perUser files)"
+        $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'MsiInstaller' } -MaxEvents 6 -ErrorAction SilentlyContinue |
+            ForEach-Object { ($_.Message -split "`r?`n")[0] })
+        throw "$What installed $found files into $Folder, distribution has $expected (per-user folder holds $perUser files); latest MsiInstaller events: $($events -join ' | ')"
     }
     $shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\$($Naming.Name).lnk"
     if (-not (Test-Path -LiteralPath $shortcut)) { throw "$What made no Start menu entry $shortcut" }

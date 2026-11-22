@@ -9,6 +9,7 @@ function ConvertTo-SedText([string]$MsiPath, [string]$OutputPath, [string]$Frien
         if ($value -match '["%\r\n]') { throw "IExpress cannot take value with quote, percent sign or line break: $value" }
     }
     if ($msiName -match '\s') { throw "package name must have no spaces: $msiName" }
+    $quiet = "cmd /c start /wait msiexec.exe /i $msiName /qn & if errorlevel 1 if not errorlevel 1641 start /wait msiexec.exe /i $msiName /qn MSIINSTALLPERUSER=1"
     $lines = @(
         '[Version]',
         'Class=IEXPRESS',
@@ -40,8 +41,8 @@ function ConvertTo-SedText([string]$MsiPath, [string]$OutputPath, [string]$Frien
         "FriendlyName=$FriendlyName",
         "AppLaunched=msiexec.exe /i $msiName",
         'PostInstallCmd=<None>',
-        "AdminQuietInstCmd=cmd /c start /wait msiexec.exe /i $msiName /qn & if errorlevel 1 if not errorlevel 1641 start /wait msiexec.exe /i $msiName /qn MSIINSTALLPERUSER=1",
-        "UserQuietInstCmd=msiexec.exe /i $msiName /qn MSIINSTALLPERUSER=1",
+        "AdminQuietInstCmd=$quiet",
+        "UserQuietInstCmd=$quiet",
         "FILE0=`"$msiName`"",
         '[SourceFiles]',
         "SourceFiles0=$msiFolder",

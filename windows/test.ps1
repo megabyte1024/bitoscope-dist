@@ -527,11 +527,12 @@ Test-Case 'newer download replaces older cache completely' {
     } finally { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Test-Case 'SED quiet commands: standard user per user, administrator per machine and per user when that fails' {
+Test-Case 'SED quiet commands: both try per machine first and per user when that fails' {
     $text = ConvertTo-SedText 'C:\o\a.msi' 'C:\o\a.exe' 'A'
-    if ($text -notmatch '(?m)^UserQuietInstCmd=msiexec\.exe /i a\.msi /qn MSIINSTALLPERUSER=1\r?$') { throw "UserQuietInstCmd line wrong:`n$text" }
-    $admin = 'AdminQuietInstCmd=cmd /c start /wait msiexec.exe /i a.msi /qn & if errorlevel 1 if not errorlevel 1641 start /wait msiexec.exe /i a.msi /qn MSIINSTALLPERUSER=1'
-    if ($text -notmatch ('(?m)^' + [regex]::Escape($admin) + '\r?$')) { throw "AdminQuietInstCmd line wrong:`n$text" }
+    $chain = 'cmd /c start /wait msiexec.exe /i a.msi /qn & if errorlevel 1 if not errorlevel 1641 start /wait msiexec.exe /i a.msi /qn MSIINSTALLPERUSER=1'
+    foreach ($name in 'AdminQuietInstCmd', 'UserQuietInstCmd') {
+        if ($text -notmatch ('(?m)^' + $name + '=' + [regex]::Escape($chain) + '\r?$')) { throw "$name line wrong:`n$text" }
+    }
 }
 
 Test-Case 'arguments are quoted as Windows programs read them' {
