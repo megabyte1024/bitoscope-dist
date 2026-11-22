@@ -3,6 +3,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3
 . (Join-Path $PSScriptRoot 'dist.ps1')
+. (Join-Path $PSScriptRoot 'features.ps1')
 . (Join-Path $PSScriptRoot 'msi.ps1')
 . (Join-Path $PSScriptRoot 'iexpress.ps1')
 
@@ -390,6 +391,137 @@ Test-Case 'INSTALLFOLDER on the command line decides the folder' {
     } finally { Remove-Item -LiteralPath (Split-Path -Parent $target) -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+function New-TestFeatureProduct {
+    $product = New-UniqueTestProduct
+    $product | Add-Member -NotePropertyName Features -NotePropertyValue @(
+        [pscustomobject]@{ Id = 'Demo'; Title = 'Demo driver'; Property = 'INSTALL_DEMO' },
+        [pscustomobject]@{ Id = 'Bridge'; Title = 'Sigrok bridge driver'; Property = 'INSTALL_SIGROK' },
+        [pscustomobject]@{ Id = 'Fx2la'; Title = 'FX2LA driver'; Property = 'INSTALL_FX2LA' })
+    return $product
+}
+
+$script:TestFileFeatures = @{
+    'drivers\demo.exe' = @('Demo')
+    'drivers\sigrok-firmware\fx2lafw-a.fw' = @('Bridge', 'Fx2la')
+    'drivers\sigrok-firmware\fx2lafw-b.fw' = @('Bridge', 'Fx2la')
+}
+
+Test-Case 'msi tables: each driver is own feature below Main, switched off by its property, and shared file stays in both' {
+    $root = New-TempFolder
+    try {
+        New-TestStage $root
+        $model = New-MsiTables (New-TestFeatureProduct) (Get-StageFiles $root) $script:TestFileFeatures
+        function Get-Table($name) { return @($model.Tables | Where-Object { $_.Name -eq $name })[0] }
+        $features = @{}; foreach ($row in (Get-Table 'Feature').Rows) { $features[$row[0]] = $row }
+        Assert-Equal @('Bridge', 'Demo', 'Fx2la', 'Main') @($features.Keys | Sort-Object) 'features'
+        foreach ($id in 'Demo', 'Bridge', 'Fx2la') {
+            Assert-Equal 'Main' $features[$id][1] "parent of $id"
+            Assert-Equal 1 $features[$id][5] "level of $id"
+        }
+        $condition = @{}; foreach ($row in (Get-Table 'Condition').Rows) { $condition[$row[0]] = $row }
+        Assert-Equal @('NOT INSTALL_DEMO', 'NOT INSTALL_SIGROK', 'NOT INSTALL_FX2LA') @($condition['Demo'][2], $condition['Bridge'][2], $condition['Fx2la'][2]) 'conditions'
+        foreach ($id in 'Demo', 'Bridge', 'Fx2la') { Assert-Equal 0 $condition[$id][1] "level when $id is off" }
+        $properties = @{}; foreach ($row in (Get-Table 'Property').Rows) { $properties[$row[0]] = $row[1] }
+        foreach ($name in 'INSTALL_DEMO', 'INSTALL_SIGROK', 'INSTALL_FX2LA') { Assert-Equal '1' $properties[$name] "default of $name" }
+        $componentOf = @{}; foreach ($row in (Get-Table 'File').Rows) { $componentOf[($row[2] -split '\|')[-1]] = $row[1] }
+        $links = @((Get-Table 'FeatureComponents').Rows)
+        function Get-FeaturesOf($leaf) { return @($links | Where-Object { $_[1] -eq $componentOf[$leaf] } | ForEach-Object { $_[0] } | Sort-Object) }
+        Assert-Equal @('Main') (Get-FeaturesOf 'bitoscope_gui.exe') 'gui'
+        Assert-Equal @('Demo') (Get-FeaturesOf 'demo.exe') 'demo'
+        Assert-Equal @('Bridge', 'Fx2la') (Get-FeaturesOf 'fx2lafw-a.fw') 'shared firmware'
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'msi tables: file naming unknown feature is refused' {
+    $root = New-TempFolder
+    try {
+        New-TestStage $root
+        Assert-Throws { New-MsiTables (New-TestFeatureProduct) (Get-StageFiles $root) @{ 'drivers\demo.exe' = @('Nope') } } "feature 'Nope'"
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'msi dialogs: one checkbox per driver on folder dialog, each tied to its property and to its feature' {
+    $root = New-TempFolder
+    try {
+        New-TestStage $root
+        $model = New-MsiTables (New-TestFeatureProduct) (Get-StageFiles $root) $script:TestFileFeatures
+        $t = @{}; foreach ($table in $model.Tables) { $t[$table.Name] = $table }
+        $boxes = @($t['Control'].Rows | Where-Object { $_[0] -eq 'FolderDlg' -and $_[2] -eq 'CheckBox' })
+        Assert-Equal @('INSTALL_DEMO', 'INSTALL_FX2LA', 'INSTALL_SIGROK') @($boxes | ForEach-Object { $_[8] } | Sort-Object) 'checkbox properties'
+        $values = @{}; foreach ($row in $t['CheckBox'].Rows) { $values[$row[0]] = $row[1] }
+        foreach ($box in $boxes) {
+            Assert-Equal '1' $values[$box[8]] "checked value of $($box[8])"
+            if ($box[9] -match '(?i)\b(the|a|an)\b') { throw "checkbox text with article: $($box[9])" }
+        }
+        $controls = @{}; foreach ($row in $t['Control'].Rows) { $controls["$($row[0])/$($row[1])"] = $row }
+        foreach ($row in $t['Control'].Rows | Where-Object { $_[0] -eq 'FolderDlg' }) {
+            if ($null -ne $row[10] -and -not $controls.ContainsKey("FolderDlg/$($row[10])")) { throw "FolderDlg/$($row[1]) has missing next control $($row[10])" }
+        }
+        $install = @($t['ControlEvent'].Rows | Where-Object { $_[0] -eq 'FolderDlg' -and $_[1] -eq 'Install' } | Sort-Object { $_[5] })
+        $end = @($install | Where-Object { $_[2] -eq 'EndDialog' })[0][5]
+        foreach ($pair in @(@('Demo', 'INSTALL_DEMO'), @('Bridge', 'INSTALL_SIGROK'), @('Fx2la', 'INSTALL_FX2LA'))) {
+            $remove = @($install | Where-Object { $_[2] -eq 'Remove' -and $_[3] -eq $pair[0] })
+            $add = @($install | Where-Object { $_[2] -eq 'AddLocal' -and $_[3] -eq $pair[0] })
+            Assert-Equal @("NOT $($pair[1])") @($remove | ForEach-Object { $_[4] }) "Remove condition of $($pair[0])"
+            Assert-Equal @($pair[1]) @($add | ForEach-Object { $_[4] }) "AddLocal condition of $($pair[0])"
+            if ($remove[0][5] -ge $end -or $add[0][5] -ge $end) { throw "feature events of $($pair[0]) must run before EndDialog" }
+        }
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'msiexec arguments: empty property value is written as two quotes so msiexec clears property' {
+    Assert-Equal 'INSTALL_DEMO="" /qn' (ConvertTo-MsiexecArguments @('INSTALL_DEMO=', '/qn'))
+}
+
+function Get-InstalledRelatives([string]$Folder) {
+    return @(Get-ChildItem -LiteralPath $Folder -Recurse -File -Force -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.FullName.Substring($Folder.Length + 1) } | Sort-Object)
+}
+
+function Use-FeatureInstall([string[]]$ExtraProperties, [scriptblock]$Check) {
+    $root = New-TempFolder
+    $product = New-TestFeatureProduct
+    $msi = Join-Path $root 'test.msi'
+    $folder = Join-Path $env:LOCALAPPDATA "Programs\$($product.Folder)"
+    try {
+        New-TestStage (Join-Path $root 'stage')
+        New-MsiPackage -Stage (Join-Path $root 'stage') -OutputPath $msi -WorkFolder (Join-Path $root 'work') -Product $product -FileFeatures $script:TestFileFeatures
+        Assert-Equal 0 (Invoke-TestMsiexec (@('/i', $msi, '/qn', 'MSIINSTALLPERUSER=1', '/l*v', (Join-Path $root 'install.log')) + $ExtraProperties)) 'install exit code'
+        & $Check @(Get-InstalledRelatives $folder)
+        Assert-Equal 0 (Invoke-TestMsiexec @('/x', $msi, '/qn')) 'uninstall exit code'
+        Assert-Equal 0 @(Get-InstalledRelatives $folder).Count 'files left after uninstall'
+    } finally {
+        [void](Invoke-TestMsiexec @('/x', $product.ProductCode, '/qn'))
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'msi installs every driver when no property is given' {
+    Use-FeatureInstall @() {
+        param($files)
+        Assert-Equal @('assets\fonts\Google Sans[wght].ttf', 'bitoscope_gui.exe', 'drivers\demo.exe', 'drivers\sigrok-firmware\fx2lafw-a.fw', 'drivers\sigrok-firmware\fx2lafw-b.fw') $files 'installed files'
+    }
+}
+
+Test-Case 'msi without demo driver installs rest' {
+    Use-FeatureInstall @('INSTALL_DEMO=') {
+        param($files)
+        Assert-Equal @('assets\fonts\Google Sans[wght].ttf', 'bitoscope_gui.exe', 'drivers\sigrok-firmware\fx2lafw-a.fw', 'drivers\sigrok-firmware\fx2lafw-b.fw') $files 'installed files'
+    }
+}
+
+Test-Case 'msi keeps shared file while one of its two drivers is chosen, and drops it when neither is' {
+    Use-FeatureInstall @('INSTALL_DEMO=', 'INSTALL_SIGROK=') {
+        param($files)
+        Assert-Equal @('assets\fonts\Google Sans[wght].ttf', 'bitoscope_gui.exe', 'drivers\sigrok-firmware\fx2lafw-a.fw', 'drivers\sigrok-firmware\fx2lafw-b.fw') $files 'only FX2LA'
+    }
+    Use-FeatureInstall @('INSTALL_DEMO=', 'INSTALL_SIGROK=', 'INSTALL_FX2LA=') {
+        param($files)
+        Assert-Equal @('assets\fonts\Google Sans[wght].ttf', 'bitoscope_gui.exe') $files 'minimal installation has no driver and no driver folder'
+    }
+}
+
 Test-Case 'msi tables need program' {
     $root = New-TempFolder
     try {
@@ -584,6 +716,14 @@ Invoke-Reader
     } finally { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
+Test-Case 'imports reader with root takes paths relative to it' {
+    $reader = New-ImportsReader (Get-VisualStudio).Dumpbin "$env:SystemRoot\System32"
+    $names = @(foreach ($item in (& $reader 'cmd.exe')) { $item })
+    $viaFullPath = @(foreach ($item in (& (New-ImportsReader (Get-VisualStudio).Dumpbin) "$env:SystemRoot\System32\cmd.exe")) { $item })
+    if ($names.Count -eq 0) { throw 'no imports read through root' }
+    Assert-Equal $viaFullPath $names 'imports through root and through full path'
+}
+
 Test-Case 'missing DLL is named, DLL beside, API set and system DLL are not' {
     $root = New-TempFolder
     try {
@@ -614,6 +754,15 @@ Test-Case 'clean distribution has no problems, broken one names each' {
         Assert-Equal @('drivers\demo.exe needs gone.dll, found nowhere it would be loaded from', 'bitoscope_cli.exe is in distribution') `
             (Get-DistributionProblems "$root\stage" "$root\system" $broken) 'problems of broken distribution'
     } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'plugin listing exit: failure is accepted only for installation without drivers, and only for missing drivers' {
+    $noDrivers = 'decoder plugins in C:\x\decoders:' + "`n" + 'bitoscope_cli: no drivers in C:\x\drivers (give driver directory with --driver-dir)'
+    Assert-Equal $true (Test-ListingExit 0 'anything' $false) 'exit 0'
+    Assert-Equal $false (Test-ListingExit 1 $noDrivers $false) 'missing drivers when drivers are expected'
+    Assert-Equal $true (Test-ListingExit 1 $noDrivers $true) 'missing drivers when none are installed'
+    Assert-Equal $false (Test-ListingExit 1 'bitoscope_cli: driver crashed' $true) 'other failure without drivers'
+    Assert-Equal $false (Test-ListingExit 2 $noDrivers $true) 'other exit code without drivers'
 }
 
 Test-Case 'Visual C++ runtime is copied beside each program, with its own needs' {
@@ -647,6 +796,156 @@ Test-Case 'merge refuses same file with different content from two repos' {
     } finally { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
+Test-Case 'merge records every repo that installs same file' {
+    $root = New-TempFolder
+    try {
+        foreach ($name in @('a', 'b')) {
+            New-Item -ItemType Directory -Path "$root\$name\drivers" | Out-Null
+            [System.IO.File]::WriteAllText("$root\$name\drivers\libusb-1.0.dll", 'same')
+        }
+        [System.IO.File]::WriteAllText("$root\b\drivers\only-b.dll", 'b')
+        $owners = @{}
+        Merge-Tree "$root\a" "$root\stage" 'repo-a' $owners
+        Merge-Tree "$root\b" "$root\stage" 'repo-b' $owners
+        Assert-Equal @('repo-a', 'repo-b') @($owners['drivers\libusb-1.0.dll']) 'owners of shared file'
+        Assert-Equal @('repo-b') @($owners['drivers\only-b.dll']) 'owners of file of one repo'
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+function New-FeatureFixture {
+    $imports = @{
+        'drivers\demo.exe' = @('KERNEL32.dll', 'VCRUNTIME140.dll')
+        'drivers\fnirsi_dla.exe' = @('libusb-1.0.dll', 'vcruntime140.dll')
+        'drivers\fx2la.exe' = @('LIBUSB-1.0.DLL', 'msvcp140.dll', 'vcruntime140.dll')
+        'drivers\sigrok_bridge.exe' = @('libsigrok.dll', 'vcruntime140.dll')
+        'drivers\libsigrok.dll' = @('libusb-1.0.dll', 'glib-2.0-0.dll')
+        'drivers\glib-2.0-0.dll' = @()
+        'drivers\libusb-1.0.dll' = @()
+        'drivers\vcruntime140.dll' = @()
+        'drivers\msvcp140.dll' = @('vcruntime140.dll')
+    }
+    $relatives = @($imports.Keys) + @('drivers\sigrok-firmware\a.fw', 'bitoscope_gui.exe', 'assets\x.ttf', 'decoders\uart.exe', 'decoders\vcruntime140.dll')
+    $owners = @{
+        'drivers\demo.exe' = @('bitoscope'); 'drivers\fnirsi_dla.exe' = @('bitoscope-fnirsi-dla'); 'drivers\fx2la.exe' = @('bitoscope-fx2la'); 'drivers\sigrok_bridge.exe' = @('bitoscope-sigrok-bridge')
+        'drivers\libsigrok.dll' = @('bitoscope-sigrok-bridge'); 'drivers\libusb-1.0.dll' = @('bitoscope-sigrok-bridge'); 'drivers\glib-2.0-0.dll' = @('bitoscope-sigrok-bridge')
+        'drivers\sigrok-firmware\a.fw' = @('bitoscope-sigrok-bridge', 'bitoscope-fx2la')
+    }
+    return [pscustomobject]@{ Relatives = $relatives; Owners = $owners; Imports = $imports }
+}
+
+function Get-FixtureFeatures($Fixture) {
+    $reader = { param($relative) return , @($Fixture.Imports[$relative.ToLowerInvariant()]) }.GetNewClosure()
+    return Get-FileFeatures $Fixture.Relatives $Fixture.Owners $reader
+}
+
+function Get-FixturePackageFiles([string]$Kind) {
+    $fixture = New-FeatureFixture
+    $fixture.Relatives += @('licenses\a.txt', 'licenses\SOURCES.txt')
+    return @(Get-PackageFiles $fixture.Relatives (Get-FixtureFeatures $fixture) $Kind | Sort-Object)
+}
+
+Test-Case 'application package holds application, decoders, demo driver and what demo driver loads' {
+    Assert-Equal @('assets\x.ttf', 'bitoscope_gui.exe', 'decoders\uart.exe', 'decoders\vcruntime140.dll', 'drivers\demo.exe', 'drivers\vcruntime140.dll', 'licenses\a.txt', 'licenses\SOURCES.txt') (Get-FixturePackageFiles 'application') 'application files'
+}
+
+Test-Case 'driver package holds driver, every file it loads, firmware if it uses it, and licences' {
+    Assert-Equal @('drivers\fnirsi_dla.exe', 'drivers\libusb-1.0.dll', 'drivers\vcruntime140.dll', 'licenses\a.txt', 'licenses\SOURCES.txt') (Get-FixturePackageFiles 'Dla') 'DLA-16 files'
+    Assert-Equal @('drivers\fx2la.exe', 'drivers\libusb-1.0.dll', 'drivers\msvcp140.dll', 'drivers\sigrok-firmware\a.fw', 'drivers\vcruntime140.dll', 'licenses\a.txt', 'licenses\SOURCES.txt') (Get-FixturePackageFiles 'Fx2la') 'FX2LA files'
+    Assert-Equal @('drivers\glib-2.0-0.dll', 'drivers\libsigrok.dll', 'drivers\libusb-1.0.dll', 'drivers\sigrok_bridge.exe', 'drivers\sigrok-firmware\a.fw', 'drivers\vcruntime140.dll', 'licenses\a.txt', 'licenses\SOURCES.txt') (Get-FixturePackageFiles 'Bridge') 'sigrok bridge files'
+}
+
+Test-Case 'whole package holds every file' {
+    $fixture = New-FeatureFixture
+    Assert-Equal @($fixture.Relatives | Sort-Object) @(Get-PackageFiles $fixture.Relatives (Get-FixtureFeatures $fixture) 'all' | Sort-Object) 'all files'
+}
+
+Test-Case 'package kind nobody offers is refused' {
+    $fixture = New-FeatureFixture
+    Assert-Throws { Get-PackageFiles $fixture.Relatives (Get-FixtureFeatures $fixture) 'Nope' } "no package kind 'Nope'"
+}
+
+Test-Case 'zip of chosen files keeps folder layout under one base folder with forward slashes' {
+    $root = New-TempFolder
+    try {
+        New-TestStage (Join-Path $root 'stage')
+        $zip = Join-Path $root 'part.zip'
+        New-FilesZip (Join-Path $root 'stage') @('bitoscope_gui.exe', 'drivers\sigrok-firmware\fx2lafw-a.fw') $zip 'base-1.0'
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+        try { $names = @($archive.Entries | ForEach-Object { $_.FullName } | Sort-Object) } finally { $archive.Dispose() }
+        Assert-Equal @('base-1.0/bitoscope_gui.exe', 'base-1.0/drivers/sigrok-firmware/fx2lafw-a.fw') $names 'entries'
+        Assert-Throws { New-FilesZip (Join-Path $root 'stage') @('missing.exe') (Join-Path $root 'bad.zip') 'base-1.0' } 'missing.exe'
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'feature map is saved and read back, single feature stays a list' {
+    $root = New-TempFolder
+    try {
+        $map = @{ 'drivers\demo.exe' = @('Demo'); 'drivers\libusb-1.0.dll' = @('Bridge', 'Dla') }
+        Save-FileFeatures $map (Join-Path $root 'features.json')
+        $back = Read-FileFeatures (Join-Path $root 'features.json')
+        Assert-Equal @('drivers\demo.exe', 'drivers\libusb-1.0.dll') @($back.Keys | Sort-Object) 'keys'
+        Assert-Equal @('Demo') @($back['drivers\demo.exe']) 'one feature'
+        Assert-Equal 1 @($back['drivers\demo.exe']).Count 'count of one feature'
+        Assert-Equal @('Bridge', 'Dla') @($back['drivers\libusb-1.0.dll']) 'two features'
+        Assert-Throws { Read-FileFeatures (Join-Path $root 'missing.json') } 'run target stage first'
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
+Test-Case 'driver programs belong to their own feature only' {
+    $features = Get-FixtureFeatures (New-FeatureFixture)
+    Assert-Equal @('Demo') @($features['drivers\demo.exe']) 'demo'
+    Assert-Equal @('Dla') @($features['drivers\fnirsi_dla.exe']) 'dla'
+    Assert-Equal @('Bridge') @($features['drivers\sigrok_bridge.exe']) 'bridge'
+    Assert-Equal @('Fx2la') @($features['drivers\fx2la.exe']) 'fx2la'
+}
+
+Test-Case 'library belongs to every feature whose programs load it, directly or through another library' {
+    $fixture = New-FeatureFixture
+    $features = Get-FixtureFeatures $fixture
+    Assert-Equal @('Bridge', 'Demo', 'Dla', 'Fx2la') @($features['drivers\vcruntime140.dll'] | Sort-Object) 'runtime needed by all'
+    Assert-Equal @('Fx2la') @($features['drivers\msvcp140.dll']) 'runtime of one'
+    Assert-Equal @('Bridge', 'Dla', 'Fx2la') @($features['drivers\libusb-1.0.dll'] | Sort-Object) 'libusb used by three'
+    Assert-Equal @('Bridge') @($features['drivers\libsigrok.dll']) 'libsigrok'
+    Assert-Equal @('Bridge') @($features['drivers\glib-2.0-0.dll']) 'library of library'
+    $fixture.Owners.Remove('drivers\libusb-1.0.dll')
+    $fixture.Owners.Remove('drivers\glib-2.0-0.dll')
+    $withoutOwner = Get-FixtureFeatures $fixture
+    Assert-Equal @('Bridge', 'Dla', 'Fx2la') @($withoutOwner['drivers\libusb-1.0.dll'] | Sort-Object) 'libusb without owner'
+    Assert-Equal @('Bridge') @($withoutOwner['drivers\glib-2.0-0.dll']) 'library of library without owner'
+}
+
+Test-Case 'file nobody loads goes with the repo that installed it, and firmware with both of its repos' {
+    $fixture = New-FeatureFixture
+    $fixture.Relatives += 'drivers\bridge_usb.dll'
+    $fixture.Owners['drivers\bridge_usb.dll'] = @('bitoscope-sigrok-bridge')
+    $fixture.Imports['drivers\bridge_usb.dll'] = @()
+    $features = Get-FixtureFeatures $fixture
+    Assert-Equal @('Bridge') @($features['drivers\bridge_usb.dll']) 'library loaded at run time'
+    Assert-Equal @('Bridge', 'Fx2la') @($features['drivers\sigrok-firmware\a.fw'] | Sort-Object) 'firmware'
+}
+
+Test-Case 'only files of drivers folder are listed, everything else stays with application' {
+    $features = Get-FixtureFeatures (New-FeatureFixture)
+    foreach ($relative in 'bitoscope_gui.exe', 'assets\x.ttf', 'decoders\uart.exe', 'decoders\vcruntime140.dll') {
+        if ($features.ContainsKey($relative)) { throw "$relative was given a driver feature" }
+    }
+}
+
+Test-Case 'driver program no feature offers is refused' {
+    $fixture = New-FeatureFixture
+    $fixture.Relatives += 'drivers\new_driver.exe'
+    $fixture.Imports['drivers\new_driver.exe'] = @()
+    Assert-Throws { Get-FixtureFeatures $fixture } 'drivers\\new_driver.exe.*no feature'
+}
+
+Test-Case 'file in drivers folder that no program loads and no repo installed is refused' {
+    $fixture = New-FeatureFixture
+    $fixture.Relatives += 'drivers\orphan.dll'
+    $fixture.Imports['drivers\orphan.dll'] = @()
+    Assert-Throws { Get-FixtureFeatures $fixture } 'drivers\\orphan.dll.*belongs to no driver'
+}
+
 Test-Case 'plugin missing from listing is named' {
     $listing = "demo: 1 device`r`n  demo-0  Demo device`r`nsigrok_bridge: no device`r`n"
     Assert-Equal @('fnirsi_dla') (Find-UnlistedPlugins @('demo', 'fnirsi_dla', 'sigrok_bridge') $listing)
@@ -659,7 +958,10 @@ Test-Case 'manifest needs every repo with full commit' {
         $path = Join-Path $root 'manifest.json'
         $good = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'manifest.json') -Raw
         [System.IO.File]::WriteAllText($path, $good)
-        Assert-Equal 3 @((Read-Manifest $path).repos).Count 'repo count'
+        Assert-Equal 4 @((Read-Manifest $path).repos).Count 'repo count'
+        [System.IO.File]::WriteAllText($path, ($good -replace '"name": "bitoscope-fx2la"', '"name": "other"'))
+        Assert-Throws { Read-Manifest $path } 'must name repo bitoscope-fx2la once'
+        [System.IO.File]::WriteAllText($path, $good)
         [System.IO.File]::WriteAllText($path, ($good -replace '"commit": "([0-9a-f]{8})[0-9a-f]{32}"', '"commit": "$1"'))
         Assert-Throws { Read-Manifest $path } 'commit of bitoscope is not 40 hex digits'
         [System.IO.File]::WriteAllText($path, ($good -replace '"version": "[^"]+"', '"version": "0.4"'))
@@ -675,7 +977,8 @@ function New-NightlyManifestText {
   "repos": [
     {"name": "bitoscope", "url": "https://example.invalid/a.git", "branch": "main", "commit": "1111111111111111111111111111111111111111"},
     {"name": "bitoscope-fnirsi-dla", "url": "https://example.invalid/b.git", "branch": "main", "commit": "2222222222222222222222222222222222222222"},
-    {"name": "bitoscope-sigrok-bridge", "url": "https://example.invalid/c.git", "branch": "main", "commit": "3333333333333333333333333333333333333333"}
+    {"name": "bitoscope-sigrok-bridge", "url": "https://example.invalid/c.git", "branch": "main", "commit": "3333333333333333333333333333333333333333"},
+    {"name": "bitoscope-fx2la", "url": "https://example.invalid/d.git", "branch": "master", "commit": "4444444444444444444444444444444444444444"}
   ]
 }
 '@

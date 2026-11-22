@@ -10,7 +10,7 @@ function Read-Manifest([string]$Path) {
     if ($manifest.version -notmatch '^\d+\.\d+\.\d+$') {
         throw "manifest version '$($manifest.version)' is not MAJOR.MINOR.PATCH"
     }
-    foreach ($name in @('bitoscope', 'bitoscope-fnirsi-dla', 'bitoscope-sigrok-bridge')) {
+    foreach ($name in @('bitoscope', 'bitoscope-fnirsi-dla', 'bitoscope-sigrok-bridge', 'bitoscope-fx2la')) {
         $repo = @($manifest.repos | Where-Object { $_.name -eq $name })
         if ($repo.Count -ne 1) { throw "manifest must name repo $name once" }
         if ($repo[0].commit -notmatch '^[0-9a-f]{40}$') { throw "manifest: commit of $name is not 40 hex digits" }
@@ -235,9 +235,13 @@ function Get-Imports([string]$Dumpbin, [string]$Path) {
     return , (ConvertFrom-DumpbinDependents ($output -join "`n"))
 }
 
-function New-ImportsReader([string]$Dumpbin) {
+function New-ImportsReader([string]$Dumpbin, [string]$Root = '') {
     $quoted = "'" + $Dumpbin.Replace("'", "''") + "'"
-    return [scriptblock]::Create("param(`$path) Get-Imports $quoted `$path")
+    if ($Root -eq '') {
+        return [scriptblock]::Create("param(`$path) Get-Imports $quoted `$path")
+    }
+    $quotedRoot = "'" + $Root.Replace("'", "''") + "'"
+    return [scriptblock]::Create("param(`$path) Get-Imports $quoted (Join-Path $quotedRoot `$path)")
 }
 
 function Get-Binaries([string]$Root) {
@@ -294,14 +298,16 @@ function Merge-Tree([string]$Source, [string]$Destination, [string]$Owner, [hash
     foreach ($file in Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Force) {
         $relative = $file.FullName.Substring($sourceRoot.Length + 1)
         $target = Join-Path $Destination $relative
+        $key = $relative.ToLowerInvariant()
         if (Test-Path -LiteralPath $target) {
             $same = (Get-FileHash -LiteralPath $target).Hash -eq (Get-FileHash -LiteralPath $file.FullName).Hash
-            if (-not $same) { throw "$relative is installed by $($Owners[$relative.ToLowerInvariant()]) and $Owner with different content" }
+            if (-not $same) { throw "$relative is installed by $(@($Owners[$key]) -join ' and ') and $Owner with different content" }
+            $Owners[$key] = @($Owners[$key]) + @($Owner)
             continue
         }
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
         Copy-Item -LiteralPath $file.FullName -Destination $target
-        $Owners[$relative.ToLowerInvariant()] = $Owner
+        $Owners[$key] = @($Owner)
     }
 }
 
@@ -368,7 +374,12 @@ function Get-DistributionProblems([string]$Root, [string]$SystemFolder, [scriptb
     return , $problems
 }
 
-function Test-Distribution([string]$Root, [string]$Checker, [string]$Dumpbin, [string]$HomeFolder) {
+function Test-ListingExit([int]$ExitCode, [string]$Output, [bool]$NoDrivers) {
+    if ($ExitCode -eq 0) { return $true }
+    return $NoDrivers -and $ExitCode -eq 1 -and $Output -match 'no drivers in'
+}
+
+function Test-Distribution([string]$Root, [string]$Checker, [string]$Dumpbin, [string]$HomeFolder, [switch]$NoDrivers) {
     $problems = Get-DistributionProblems $Root "$env:SystemRoot\System32" (New-ImportsReader $Dumpbin)
     if ($problems.Count -gt 0) { throw "distribution in $Root failed checks:`n  $($problems -join "`n  ")" }
 
@@ -380,7 +391,9 @@ function Test-Distribution([string]$Root, [string]$Checker, [string]$Dumpbin, [s
     } finally {
         Remove-Item -LiteralPath $placed -Force
     }
-    if ($result.ExitCode -ne 0) { throw "bitoscope_cli --list-devices exited $($result.ExitCode):`n$($result.Output)" }
+    if (-not (Test-ListingExit $result.ExitCode $result.Output ([bool]$NoDrivers))) {
+        throw "bitoscope_cli --list-devices exited $($result.ExitCode):`n$($result.Output)"
+    }
     $unlisted = @(Find-UnlistedPlugins (Get-Plugins $Root) $result.Output)
     if ($unlisted.Count -gt 0) { throw "bitoscope_cli --list-devices does not list $($unlisted -join ', '):`n$($result.Output)" }
 }

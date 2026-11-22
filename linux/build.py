@@ -27,7 +27,8 @@ from pathlib import Path
 
 TARGETS = ("all", "fetch", "build", "stage", "package", "nightly-manifest", "nightly-notes", "nightly-changed")
 
-REPOS = {"main": "bitoscope", "dla": "bitoscope-fnirsi-dla", "bridge": "bitoscope-sigrok-bridge"}
+REPOS = {"main": "bitoscope", "dla": "bitoscope-fnirsi-dla", "bridge": "bitoscope-sigrok-bridge",
+         "fx2la": "bitoscope-fx2la"}
 
 ARCH = "x86_64"
 
@@ -455,16 +456,21 @@ class Distribution:
 
     def build(self) -> None:
         require_tools()
-        main, dla, bridge = self.source("main"), self.source("dla"), self.source("bridge")
+        main, dla, bridge, fx2la = (self.source(key) for key in ("main", "dla", "bridge", "fx2la"))
         jobs = build_jobs(main, self.arguments.jobs)
         self.steps.run("Build libsigrok", ["sh", "scripts/build_libsigrok_linux.sh"], cwd=bridge)
+        firmware = bridge / "third_party" / "sigrok-firmware"
         provide_firmware(
             lambda: self.steps.run("Fetch sigrok firmware", ["sh", "scripts/fetch_sigrok_firmware.sh"], cwd=bridge,
                                    attempts=NETWORK_ATTEMPTS),
-            bridge / "third_party" / "sigrok-firmware", self.arguments.firmware_dir)
+            firmware, self.arguments.firmware_dir)
         self.steps.run("Configure bridge", ["cmake", "-S", str(bridge), "-B", str(bridge / "build"),
                                             "-DCMAKE_BUILD_TYPE=Release"])
         self.steps.run("Build bridge", ["cmake", "--build", str(bridge / "build"), "--parallel", str(jobs)])
+        copy_firmware(firmware, fx2la / "third_party" / "sigrok-firmware")
+        self.steps.run("Configure fx2la", ["cmake", "-S", str(fx2la), "-B", str(fx2la / "build"),
+                                           "-DCMAKE_BUILD_TYPE=Release"], attempts=NETWORK_ATTEMPTS)
+        self.steps.run("Build fx2la", ["cmake", "--build", str(fx2la / "build"), "--parallel", str(jobs)])
         cmake_project(self.steps, "dla", dla, jobs, [], [])
         cmake_project(self.steps, "main", main, jobs, [f"-DCMAKE_INSTALL_PREFIX={main / 'deps'}"],
                       ["-DBITOSCOPE_GUI_TEST_HOOK=OFF"])
@@ -492,7 +498,7 @@ class Distribution:
             remove_tree(folder)
         stage.mkdir(parents=True)
         owners: dict[str, str] = {}
-        for key in ("main", "dla", "bridge"):
+        for key in ("main", "dla", "bridge", "fx2la"):
             build = self.source(key) / "build"
             if not (build / "CMakeCache.txt").is_file():
                 raise DistError(f"{REPOS[key]} is not built: run target build first")
@@ -506,6 +512,7 @@ class Distribution:
         bridge = self.source("bridge")
         copies = {self.source("dla") / "LICENSE": "fnirsi_dla-LICENSE.txt",
                   bridge / "COPYING": "sigrok_bridge-COPYING.txt",
+                  self.source("fx2la") / "COPYING": "fx2la-COPYING.txt",
                   bridge / "third_party" / "libsigrok" / "COPYING": "libsigrok-COPYING.txt"}
         for source, name in copies.items():
             if not source.is_file():
@@ -585,12 +592,12 @@ class Distribution:
             lines.append(f"{repo.name}: {repo.url}, {repo.ref_text}, commit {repo.commit}")
         lines += [f"libsigrok: https://github.com/sigrokproject/libsigrok.git, commit {libsigrok}",
                   "fx2lafw firmware: https://sigrok.org/download/binary/sigrok-firmware-fx2lafw/ (version named in "
-                  "bitoscope-sigrok-bridge scripts/fetch_sigrok_firmware.sh)"]
+                  "bitoscope-sigrok-bridge scripts/fetch_sigrok_firmware.sh; bitoscope-fx2la uses the same files)"]
         os_release = Path("/etc/os-release").read_text(errors="replace") if Path("/etc/os-release").is_file() else ""
         distribution = re.search(r'^PRETTY_NAME="?([^"\n]*)', os_release, re.MULTILINE)
         lines.append(f"Libraries in drivers/lib come from {distribution.group(1) if distribution else 'build system'} "
                      f"packages: {', '.join(sorted(packages)) or 'none'}")
-        lines += ["", "bitoscope-sigrok-bridge and libsigrok are licensed under GPL-3.0-or-later; their complete source is at",
+        lines += ["", "bitoscope-sigrok-bridge, bitoscope-fx2la and libsigrok are licensed under GPL-3.0-or-later; their complete source is at",
                   "addresses above, at commits named there."]
         (licenses / "SOURCES.txt").write_text("\n".join(lines) + "\n")
 

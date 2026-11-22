@@ -81,7 +81,7 @@ function ConvertTo-MsiexecArguments([string[]]$Arguments) {
         if ($argument -match '^([A-Za-z_][A-Za-z0-9_.]*)=(.*)$') {
             $name = $Matches[1]
             $value = $Matches[2].TrimEnd('\')
-            if ($value -match '[\s"]') { "$name=`"$value`"" } else { "$name=$value" }
+            if ($value -eq '' -or $value -match '[\s"]') { "$name=`"$value`"" } else { "$name=$value" }
         } elseif ($argument -match '[\s"]') {
             "`"$argument`""
         } else {
@@ -194,7 +194,15 @@ function Get-StageFiles([string]$Stage) {
     return @($files | Sort-Object { $_.Relative.ToLowerInvariant() })
 }
 
-function New-MsiTables($Product, [object[]]$Files) {
+function Get-ProductFeatures($Product) {
+    $property = $Product.PSObject.Properties['Features']
+    if ($null -eq $property) { return @() }
+    return @($property.Value)
+}
+
+function New-MsiTables($Product, [object[]]$Files, [hashtable]$FileFeatures = @{}) {
+    $driverFeatures = @(Get-ProductFeatures $Product)
+    $knownFeatures = @('Main') + @($driverFeatures | ForEach-Object { $_.Id })
     $directory = New-MsiTable 'Directory' @('Directory', 'Directory_Parent', 'DefaultDir') @('s72', 'S72', 'l255') @('Directory')
     $component = New-MsiTable 'Component' @('Component', 'ComponentId', 'Directory_', 'Attributes', 'Condition', 'KeyPath') `
         @('s72', 'S38', 's72', 'i2', 'S255', 'S72') @('Component')
@@ -208,6 +216,7 @@ function New-MsiTables($Product, [object[]]$Files) {
     $property = New-MsiTable 'Property' @('Property', 'Value') @('s72', 'l0') @('Property')
     $upgrade = New-MsiTable 'Upgrade' @('UpgradeCode', 'VersionMin', 'VersionMax', 'Language', 'Attributes', 'Remove', 'ActionProperty') `
         @('s38', 'S20', 'S20', 'S255', 'i4', 'S255', 's72') @('UpgradeCode', 'VersionMin', 'VersionMax', 'Language', 'Attributes')
+    $featureCondition = New-MsiTable 'Condition' @('Feature_', 'Level', 'Condition') @('s38', 'i2', 'S255') @('Feature_', 'Level')
     $launch = New-MsiTable 'LaunchCondition' @('Condition', 'Description') @('s255', 'l255') @('Condition')
     $shortcut = New-MsiTable 'Shortcut' @('Shortcut', 'Directory_', 'Name', 'Component_', 'Target', 'Arguments', 'Description',
         'Hotkey', 'Icon_', 'IconIndex', 'ShowCmd', 'WkDir') `
@@ -258,7 +267,11 @@ function New-MsiTables($Product, [object[]]$Files) {
         Add-MsiRow $component @($componentKey, (Get-StableGuid "$($Product.UpgradeCode) $($entry.Relative)"), $directoryId, 256, $null, $fileKey)
         Add-MsiRow $file @($fileKey, $componentKey, (Get-MsiFileName $leaf (Get-NamesIn $directoryId)), $entry.Size,
             $null, $null, $null, $sequence)
-        Add-MsiRow $featureComponents @('Main', $componentKey)
+        $featuresOfFile = if ($FileFeatures.ContainsKey($entry.Relative.ToLowerInvariant())) { @($FileFeatures[$entry.Relative.ToLowerInvariant()]) } else { @('Main') }
+        foreach ($featureId in $featuresOfFile) {
+            if ($featureId -notin $knownFeatures) { throw "$($entry.Relative) names feature '$featureId', which the product does not have" }
+            Add-MsiRow $featureComponents @($featureId, $componentKey)
+        }
         $cabinetOrder.Add([pscustomobject]@{ Key = $fileKey; Path = $entry.Path })
         if ($entry.Relative -eq $Product.Program) {
             $guiKey = $fileKey
@@ -268,6 +281,10 @@ function New-MsiTables($Product, [object[]]$Files) {
     if ($null -eq $guiKey) { throw "stage holds no $($Product.Program)" }
 
     Add-MsiRow $feature @('Main', $null, $Product.Name, $Product.Name, 1, 1, 'INSTALLFOLDER', 0)
+    foreach ($driver in $driverFeatures) {
+        Add-MsiRow $feature @($driver.Id, 'Main', $driver.Title, $driver.Title, 0, 1, $null, 0)
+        Add-MsiRow $featureCondition @($driver.Id, 0, "NOT $($driver.Property)")
+    }
     Add-MsiRow $media @(1, $sequence, $null, "#$($Product.Cabinet)", $null, $null)
     $menuNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     Add-MsiRow $shortcut @('ProgramShortcut', 'ProgramMenuFolder', (Get-MsiFileName $Product.Name $menuNames), $guiComponent,
@@ -283,14 +300,15 @@ function New-MsiTables($Product, [object[]]$Files) {
             @('ALLUSERS', '2'),
             @('ARPNOMODIFY', '1'),
             @('ARPURLINFOABOUT', $Product.Url),
-            @('SecureCustomProperties', 'UPGRADEFOUND;NEWERFOUND'))) {
+            @('SecureCustomProperties', (@('UPGRADEFOUND', 'NEWERFOUND') + @($driverFeatures | ForEach-Object { $_.Property }) -join ';')))) {
         Add-MsiRow $property $pair
     }
+    foreach ($driver in $driverFeatures) { Add-MsiRow $property @($driver.Property, '1') }
     Add-MsiRow $upgrade @($Product.UpgradeCode, $null, $Product.Version, $null, 513, $null, 'UPGRADEFOUND')
     Add-MsiRow $upgrade @($Product.UpgradeCode, $Product.Version, $null, $null, 2, $null, 'NEWERFOUND')
     Add-MsiRow $launch @('NOT NEWERFOUND', "Newer $($Product.Name) is already installed.")
 
-    $ui = New-MsiUiTables $Product $perMachine
+    $ui = New-MsiUiTables $Product $perMachine $driverFeatures
     foreach ($pair in $ui.Properties) { Add-MsiRow $property $pair }
     foreach ($row in $ui.CustomActions) { Add-MsiRow $customAction $row }
     $folderActions = @(
@@ -314,7 +332,7 @@ function New-MsiTables($Product, [object[]]$Files) {
         AdminUISequence = @(
             @('CostInitialize', 800), @('FileCost', 900), @('CostFinalize', 1000), @('ExecuteAction', 1300))
     }
-    $tables = @($directory, $component, $file, $feature, $featureComponents, $media, $property, $upgrade, $launch, $shortcut, $customAction) + $ui.Tables
+    $tables = @($directory, $component, $file, $feature, $featureCondition, $featureComponents, $media, $property, $upgrade, $launch, $shortcut, $customAction) + $ui.Tables
     foreach ($name in $sequences.Keys) {
         $table = New-MsiTable $name @('Action', 'Condition', 'Sequence') @('s72', 'S255', 'I2') @('Action')
         foreach ($action in $sequences[$name]) {
@@ -400,12 +418,13 @@ function New-MsiPackage {
         [Parameter(Mandatory)] [string]$Stage,
         [Parameter(Mandatory)] [string]$OutputPath,
         [Parameter(Mandatory)] [string]$WorkFolder,
-        [Parameter(Mandatory)] $Product
+        [Parameter(Mandatory)] $Product,
+        [hashtable]$FileFeatures = @{}
     )
     if (Test-Path -LiteralPath $WorkFolder) { Remove-Item -LiteralPath $WorkFolder -Recurse -Force }
     $idtFolder = Join-Path $WorkFolder 'idt'
     New-Item -ItemType Directory -Force -Path $idtFolder | Out-Null
-    $model = New-MsiTables $Product (Get-StageFiles $Stage)
+    $model = New-MsiTables $Product (Get-StageFiles $Stage) $FileFeatures
     foreach ($table in $model.Tables) {
         [System.IO.File]::WriteAllText((Join-Path $idtFolder "$($table.Name).idt"), (ConvertTo-IdtText $table),
             [System.Text.Encoding]::ASCII)

@@ -20,6 +20,17 @@ class ManifestTest(unittest.TestCase):
         manifest = build.parse_manifest(MANIFEST)
         self.assertEqual(sorted(manifest.repos), sorted(build.REPOS.values()))
 
+    def test_names_application_and_all_three_drivers(self):
+        manifest = build.parse_manifest(MANIFEST)
+        self.assertEqual(sorted(manifest.repos), ["bitoscope", "bitoscope-fnirsi-dla", "bitoscope-fx2la",
+                                                  "bitoscope-sigrok-bridge"])
+
+    def test_refuses_manifest_without_fx2la(self):
+        data = json.loads(MANIFEST)
+        data["repos"] = [repo for repo in data["repos"] if repo["name"] != "bitoscope-fx2la"]
+        with self.assertRaisesRegex(build.DistError, "bitoscope-fx2la once"):
+            build.parse_manifest(json.dumps(data))
+
     def test_refuses_short_commit(self):
         data = json.loads(MANIFEST)
         data["repos"][0]["commit"] = data["repos"][0]["commit"][:8]
@@ -60,7 +71,7 @@ class NightlyTest(unittest.TestCase):
         self.assertTrue(nightly.nightly)
         self.assertEqual(nightly.version, "0.4.26324")
         self.assertEqual([(repo.branch, repo.tag, repo.commit) for repo in nightly.repos.values()],
-                         [("main", None, f"{index}" * 40) for index in range(1, 4)])
+                         [("main", None, f"{index}" * 40) for index in range(1, len(build.REPOS) + 1)])
 
     def test_manifest_entry_needs_tag_or_branch(self):
         data = json.loads(MANIFEST)

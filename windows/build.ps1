@@ -17,12 +17,13 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3
 . (Join-Path $PSScriptRoot 'dist.ps1')
+. (Join-Path $PSScriptRoot 'features.ps1')
 . (Join-Path $PSScriptRoot 'msi.ps1')
 . (Join-Path $PSScriptRoot 'iexpress.ps1')
 
 $Manufacturer = 'Bitoscope project'
 $ProjectUrl = 'https://github.com/megabyte1024/bitoscope'
-$Repos = [ordered]@{ main = 'bitoscope'; dla = 'bitoscope-fnirsi-dla'; bridge = 'bitoscope-sigrok-bridge' }
+$Repos = [ordered]@{ main = 'bitoscope'; dla = 'bitoscope-fnirsi-dla'; bridge = 'bitoscope-sigrok-bridge'; fx2la = 'bitoscope-fx2la' }
 $NetworkAttempts = 4
 
 function Get-VcpkgRoot {
@@ -98,12 +99,20 @@ function Invoke-Build {
     Invoke-Step 'Configure bridge with libsigrok' 'cmake' @('-S', $bridge, '-B', "$bridge\build") -Logs $logs
     Invoke-Step 'Build bridge' 'cmake' @('--build', "$bridge\build", '--config', 'Release') -Logs $logs
 
+    $fx2la = Get-Source 'fx2la'
+    Copy-Firmware $firmware "$fx2la\third_party\sigrok-firmware"
+    Invoke-Step 'Configure fx2la' 'cmake' @('-S', $fx2la, '-B', "$fx2la\build", '-DCMAKE_CONFIGURATION_TYPES=Release',
+        "-DCMAKE_TOOLCHAIN_FILE=$toolchain") -Logs $logs -Attempts $NetworkAttempts
+    Invoke-Step 'Build fx2la' 'cmake' @('--build', "$fx2la\build", '--config', 'Release') -Logs $logs
+
     Invoke-CMakeProject 'dla' @() @("-DCMAKE_TOOLCHAIN_FILE=$toolchain")
     $main = Get-Source 'main'
     Invoke-CMakeProject 'main' @("-DCMAKE_INSTALL_PREFIX=$main\deps") @('-DBITOSCOPE_GUI_TEST_HOOK=OFF')
 }
 
 function Get-StageFolder($Data) { return Join-Path $Work "stage\$($Naming.Base)" }
+
+function Get-FeaturesPath { return Join-Path $Work "stage\$($Naming.Base).features.json" }
 
 function Copy-License([string]$Source, [string]$Licenses, [string]$Name) {
     if (-not (Test-Path -LiteralPath $Source)) { throw "licence file $Source is missing" }
@@ -123,11 +132,11 @@ function Write-Sources($Data, [string]$Licenses, [string]$Vcpkg) {
     $vcpkgCommit = Get-GitOutput $Vcpkg @('rev-parse', 'HEAD')
     $lines += @(
         "libsigrok: https://github.com/sigrokproject/libsigrok.git, commit $libsigrok",
-        'fx2lafw firmware: https://sigrok.org/download/binary/sigrok-firmware-fx2lafw/ (version named in bitoscope-sigrok-bridge scripts/fetch_sigrok_firmware.sh)',
+        'fx2lafw firmware: https://sigrok.org/download/binary/sigrok-firmware-fx2lafw/ (version named in bitoscope-sigrok-bridge scripts/fetch_sigrok_firmware.sh; bitoscope-fx2la uses the same files)',
         "glib, libzip, libusb and libraries they use: vcpkg ports, https://github.com/microsoft/vcpkg.git, commit $vcpkgCommit",
         'MinGW runtime of libsigrok (libgcc, libwinpthread): MSYS2 UCRT64 packages, https://packages.msys2.org',
         '',
-        'bitoscope-sigrok-bridge and libsigrok are licensed under GPL-3.0-or-later; their complete source is at',
+        'bitoscope-sigrok-bridge, bitoscope-fx2la and libsigrok are licensed under GPL-3.0-or-later; their complete source is at',
         'addresses above, at commits named there.')
     [System.IO.File]::WriteAllLines((Join-Path $Licenses 'SOURCES.txt'), $lines, [System.Text.Encoding]::ASCII)
 }
@@ -142,7 +151,7 @@ function Invoke-Stage($Data) {
     }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     $owners = @{}
-    foreach ($key in @('main', 'dla', 'bridge')) {
+    foreach ($key in @('main', 'dla', 'bridge', 'fx2la')) {
         $source = Get-Source $key
         if (-not (Test-Path -LiteralPath "$source\build\CMakeCache.txt")) { throw "$($Repos[$key]) is not built: run target build first" }
         $prefix = Join-Path $installs $key
@@ -160,6 +169,7 @@ function Invoke-Stage($Data) {
     $bridge = Get-Source 'bridge'
     Copy-License (Join-Path (Get-Source 'dla') 'LICENSE') $licenses 'fnirsi_dla-LICENSE.txt'
     Copy-License (Join-Path $bridge 'COPYING') $licenses 'sigrok_bridge-COPYING.txt'
+    Copy-License (Join-Path (Get-Source 'fx2la') 'COPYING') $licenses 'fx2la-COPYING.txt'
     Copy-License (Join-Path $bridge 'third_party\libsigrok\COPYING') $licenses 'libsigrok-COPYING.txt'
     foreach ($port in Get-ChildItem -LiteralPath "$bridge\third_party\vcpkg_installed\x64-windows\share" -Directory) {
         $copyright = Join-Path $port.FullName 'copyright'
@@ -179,7 +189,10 @@ function Invoke-Stage($Data) {
     Write-Host "    $($added.Count) files from $($vs.Runtime)"
 
     Test-Distribution $stage (Join-Path $checker 'bitoscope_cli.exe') $vs.Dumpbin (Join-Path $Work 'home')
-    Write-Host "Distribution folder $stage is ready ($(@(Get-Plugins $stage).Count) plugins)."
+    $relatives = @(Get-StageFiles $stage | ForEach-Object { $_.Relative })
+    $features = Get-FileFeatures $relatives $owners (New-ImportsReader $vs.Dumpbin $stage)
+    Save-FileFeatures $features (Get-FeaturesPath)
+    Write-Host "Distribution folder $stage is ready ($(@(Get-Plugins $stage).Count) plugins, $($features.Count) of $($relatives.Count) files belong to drivers)."
 }
 
 function Get-Product($Data) {
@@ -197,8 +210,16 @@ function Get-Product($Data) {
     }
 }
 
-function Get-PackagePath($Data, [string]$Format) {
+$PartialZips = [ordered]@{
+    application = 'application'
+    Dla = 'dla-driver'
+    Bridge = 'sigrok-bridge-driver'
+    Fx2la = 'fx2la-driver'
+}
+
+function Get-PackagePath($Data, [string]$Format, [string]$Part = '') {
     $base = Join-Path $Out "$($Naming.Base)-windows-x64"
+    if ($Part -ne '') { return "$base-$($PartialZips[$Part]).zip" }
     switch ($Format) {
         'zip' { return "$base.zip" }
         'msi' { return "$base.msi" }
@@ -217,10 +238,22 @@ function Invoke-Package($Data) {
         if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+        $features = Read-FileFeatures (Get-FeaturesPath)
+        $relatives = @(Get-StageFiles $stage | ForEach-Object { $_.Relative })
+        foreach ($part in $PartialZips.Keys) {
+            $partZip = Get-PackagePath $Data 'zip' $part
+            $files = @(Get-PackageFiles $relatives $features $part)
+            Write-Host "==> Zip $partZip ($($files.Count) files)"
+            New-FilesZip $stage $files $partZip $Naming.Base
+        }
     }
     if ('msi' -in $Formats -or 'exe' -in $Formats) {
         Write-Host "==> Windows Installer package $msi"
-        New-MsiPackage -Stage $stage -OutputPath $msi -WorkFolder (Join-Path $Work 'msi') -Product (Get-Product $Data)
+        $features = Read-FileFeatures (Get-FeaturesPath)
+        $used = @($features.Values | ForEach-Object { $_ } | Sort-Object -Unique)
+        $product = Get-Product $Data
+        $product | Add-Member -NotePropertyName Features -NotePropertyValue @(Get-DriverFeatureDefinitions | Where-Object { $_.Id -in $used })
+        New-MsiPackage -Stage $stage -OutputPath $msi -WorkFolder (Join-Path $Work 'msi') -Product $product -FileFeatures $features
     }
     if ('exe' -in $Formats) {
         $exe = Get-PackagePath $Data 'exe'
@@ -234,8 +267,9 @@ function Invoke-Package($Data) {
     }
 }
 
-function Test-Installed([string]$Stage, [string]$Folder, [string]$Checker, [string]$Dumpbin, [string]$What) {
-    $expected = @(Get-ChildItem -LiteralPath $Stage -Recurse -File).Count
+function Test-Installed([string]$Stage, [string]$Folder, [string]$Checker, [string]$Dumpbin, [string]$What, [int]$ExpectedFiles = -1,
+        [switch]$NoDrivers) {
+    $expected = if ($ExpectedFiles -ge 0) { $ExpectedFiles } else { @(Get-ChildItem -LiteralPath $Stage -Recurse -File).Count }
     $found = @(Get-ChildItem -LiteralPath $Folder -Recurse -File -ErrorAction SilentlyContinue).Count
     if ($found -ne $expected) {
         $perUser = @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA "Programs\$($Naming.Name)") -Recurse -File -ErrorAction SilentlyContinue).Count
@@ -245,7 +279,7 @@ function Test-Installed([string]$Stage, [string]$Folder, [string]$Checker, [stri
     }
     $shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\$($Naming.Name).lnk"
     if (-not (Test-Path -LiteralPath $shortcut)) { throw "$What made no Start menu entry $shortcut" }
-    Test-Distribution $Folder $Checker $Dumpbin (Join-Path $Work 'home')
+    Test-Distribution $Folder $Checker $Dumpbin (Join-Path $Work 'home') -NoDrivers:$NoDrivers
 }
 
 function Invoke-Msiexec([string[]]$Arguments, [string]$What) {
@@ -275,6 +309,16 @@ function Invoke-InstallTest($Data) {
         Write-Host "==> Uninstall $msi"
         Invoke-Msiexec @('/x', $msi, '/qn', '/l*v', (Join-Path $logs 'msi-uninstall.log')) 'msi uninstall'
         if (Test-Path -LiteralPath $folder) { throw "msi uninstall left $folder" }
+
+        Write-Host "==> Install $msi without any driver"
+        $driverFiles = (Read-FileFeatures (Get-FeaturesPath)).Count
+        $properties = @(Get-DriverFeatureDefinitions | ForEach-Object { "$($_.Property)=" })
+        Invoke-Msiexec (@('/i', $msi, '/qn', '/l*v', (Join-Path $logs 'msi-install-minimal.log')) + $properties) 'msi install without drivers'
+        $applicationFiles = @(Get-ChildItem -LiteralPath $stage -Recurse -File).Count - $driverFiles
+        Test-Installed $stage $folder $checker $vs.Dumpbin 'msi without drivers' -ExpectedFiles $applicationFiles -NoDrivers
+        if (Test-Path -LiteralPath (Join-Path $folder 'drivers')) { throw "install without drivers made $folder\drivers" }
+        Invoke-Msiexec @('/x', $msi, '/qn', '/l*v', (Join-Path $logs 'msi-uninstall-minimal.log')) 'msi uninstall after install without drivers'
+        if (Test-Path -LiteralPath $folder) { throw "uninstall left $folder" }
     }
     if (Test-Path -LiteralPath $exe) {
         Write-Host "==> Install $exe"

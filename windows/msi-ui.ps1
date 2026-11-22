@@ -2,7 +2,7 @@
 
 Set-StrictMode -Version 3
 
-function New-MsiUiTables($Product, [string]$PerMachine) {
+function New-MsiUiTables($Product, [string]$PerMachine, [object[]]$DriverFeatures = @()) {
     $dialog = New-MsiTable 'Dialog' @('Dialog', 'HCentering', 'VCentering', 'Width', 'Height', 'Attributes', 'Title', 'Control_First',
         'Control_Default', 'Control_Cancel') @('s72', 'i2', 'i2', 'i2', 'i2', 'I4', 'L128', 's50', 'S50', 'S50') @('Dialog')
     $control = New-MsiTable 'Control' @('Dialog_', 'Control', 'Type', 'X', 'Y', 'Width', 'Height', 'Attributes', 'Property', 'Text',
@@ -13,6 +13,7 @@ function New-MsiUiTables($Product, [string]$PerMachine) {
         @('Dialog_', 'Control_', 'Event')
     $radio = New-MsiTable 'RadioButton' @('Property', 'Order', 'Value', 'X', 'Y', 'Width', 'Height', 'Text', 'Help') `
         @('s72', 'i2', 's64', 'i2', 'i2', 'i2', 'i2', 'L0', 'L50') @('Property', 'Order')
+    $checkBox = New-MsiTable 'CheckBox' @('Property', 'Value') @('s72', 'S64') @('Property')
     $style = New-MsiTable 'TextStyle' @('TextStyle', 'FaceName', 'Size', 'Color', 'StyleBits') @('s72', 's32', 'i2', 'I4', 'I2') @('TextStyle')
     $actionText = New-MsiTable 'ActionText' @('Action', 'Description', 'Template') @('s72', 'L64', 'L128') @('Action')
 
@@ -56,7 +57,17 @@ function New-MsiUiTables($Product, [string]$PerMachine) {
     Add-Dialog 'FolderDlg' 370 270 3 '[ProductName] Setup' 'Folder' 'Install' 'Cancel'
     Add-Frame 'FolderDlg' 'Install folder' 'Setup installs [ProductName] into this folder:'
     Add-Control 'FolderDlg' 'Folder' 'Edit' 25 90 245 18 3 'INSTALLFOLDER' '{260}' 'Browse'
-    Add-Control 'FolderDlg' 'Browse' 'PushButton' 278 89 70 19 3 $null 'B&rowse...' 'Back'
+    $firstAfterBrowse = if ($DriverFeatures.Count -gt 0) { "Driver$($DriverFeatures[0].Id)" } else { 'Back' }
+    Add-Control 'FolderDlg' 'Browse' 'PushButton' 278 89 70 19 3 $null 'B&rowse...' $firstAfterBrowse
+    if ($DriverFeatures.Count -gt 0) {
+        Add-Control 'FolderDlg' 'DriversLabel' 'Text' 25 124 320 12 3 $null 'Drivers to install (clear all for application only):' $null
+    }
+    for ($index = 0; $index -lt $DriverFeatures.Count; $index++) {
+        $driver = $DriverFeatures[$index]
+        $next = if ($index + 1 -lt $DriverFeatures.Count) { "Driver$($DriverFeatures[$index + 1].Id)" } else { 'Back' }
+        Add-Control 'FolderDlg' "Driver$($driver.Id)" 'CheckBox' 35 (142 + 17 * $index) 320 15 3 $driver.Property $driver.Title $next
+        Add-MsiRow $checkBox @($driver.Property, '1')
+    }
     Add-Button 'FolderDlg' 'Back' 164 '< &Back' 'Install'
     Add-Button 'FolderDlg' 'Install' 232 '&Install' 'Cancel'
     Add-Button 'FolderDlg' 'Cancel' 300 'Cancel' 'Folder'
@@ -64,7 +75,12 @@ function New-MsiUiTables($Product, [string]$PerMachine) {
     Add-Event 'FolderDlg' 'Browse' '[_BrowseProperty]' 'INSTALLFOLDER' '1' 1
     Add-Event 'FolderDlg' 'Browse' 'SpawnDialog' 'BrowseDlg' '1' 2
     Add-Event 'FolderDlg' 'Install' 'SetTargetPath' 'INSTALLFOLDER' '1' 1
-    Add-Event 'FolderDlg' 'Install' 'EndDialog' 'Return' '1' 2
+    $order = 1
+    foreach ($driver in $DriverFeatures) {
+        Add-Event 'FolderDlg' 'Install' 'Remove' $driver.Id "NOT $($driver.Property)" (++$order)
+        Add-Event 'FolderDlg' 'Install' 'AddLocal' $driver.Id $driver.Property (++$order)
+    }
+    Add-Event 'FolderDlg' 'Install' 'EndDialog' 'Return' '1' (++$order)
     Add-Event 'FolderDlg' 'Cancel' 'SpawnDialog' 'CancelDlg' '1' 1
 
     Add-Dialog 'BrowseDlg' 370 270 3 '[ProductName] Setup' 'PathEdit' 'OK' 'Cancel'
@@ -122,7 +138,7 @@ function New-MsiUiTables($Product, [string]$PerMachine) {
     }
 
     return [pscustomobject]@{
-        Tables = @($dialog, $control, $event, $mapping, $radio, $style, $actionText)
+        Tables = @($dialog, $control, $event, $mapping, $radio, $checkBox, $style, $actionText)
         Properties = @(, @('DefaultUIFont', 'DefaultFont'))
         CustomActions = @(
             , @('SetScopeChoicePerMachine', 51, 'INSTALLSCOPE', 'perMachine', $null)

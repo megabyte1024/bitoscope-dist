@@ -18,6 +18,12 @@
       "url": "https://github.com/megabyte1024/bitoscope-sigrok-bridge.git",
       "tag": "v0.4.0",
       "commit": "eec735ba7fadb8addbdb617f8ed0486c02960000"
+    },
+    {
+      "name": "bitoscope-fx2la",
+      "url": "https://github.com/megabyte1024/bitoscope-fx2la.git",
+      "branch": "master",
+      "commit": "6e21a0e44932339235a41cec314c56ece61685d2"
     }
   ]
 }

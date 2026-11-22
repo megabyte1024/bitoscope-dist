@@ -59,7 +59,7 @@ function Get-Control([int]$ProcessId, [string]$Type, [string]$Name) {
 }
 
 function Show-InstallerControls([int]$ProcessId) {
-    $names = foreach ($type in 'Button', 'RadioButton', 'Edit', 'Text') {
+    $names = foreach ($type in 'Button', 'RadioButton', 'CheckBox', 'Edit', 'Text') {
         foreach ($element in (Get-InstallerControls $ProcessId $type)) { "$type '$(Get-ControlName $element)'" }
     }
     return ($names -join '; ')
@@ -84,6 +84,14 @@ function Select-Control($Element) {
     $Element.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
 }
 
+function Get-ToggleState($Element) {
+    return [string]$Element.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState
+}
+
+function Switch-Control($Element) {
+    $Element.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()
+}
+
 function Get-ControlValue($Element) {
     return $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
 }
@@ -104,6 +112,9 @@ function New-UiTestProduct {
         ProductCode = '{' + [guid]::NewGuid().ToString().ToUpperInvariant() + '}'
         PackageCode = '{' + [guid]::NewGuid().ToString().ToUpperInvariant() + '}'
         Url = 'https://example.invalid'; Program = 'bitoscope_gui.exe'; Cabinet = 'bitoscope.cab'
+        Features = @(
+            [pscustomobject]@{ Id = 'Demo'; Title = 'Demo driver'; Property = 'INSTALL_DEMO' },
+            [pscustomobject]@{ Id = 'Dla'; Title = 'FNIRSI DLA-16 driver'; Property = 'INSTALL_DLA' })
     }
 }
 
@@ -114,11 +125,13 @@ function Use-UiSetup([scriptblock]$Body) {
     New-Item -ItemType Directory -Force -Path "$stage\drivers" | Out-Null
     [System.IO.File]::WriteAllText("$stage\bitoscope_gui.exe", 'gui')
     [System.IO.File]::WriteAllText("$stage\drivers\demo.exe", 'demo')
+    [System.IO.File]::WriteAllText("$stage\drivers\fnirsi_dla.exe", 'dla')
     $msi = Join-Path $root 'ui.msi'
     $process = $null
     $passed = $false
     try {
-        New-MsiPackage -Stage $stage -OutputPath $msi -WorkFolder (Join-Path $root 'work') -Product $product
+        New-MsiPackage -Stage $stage -OutputPath $msi -WorkFolder (Join-Path $root 'work') -Product $product `
+            -FileFeatures @{ 'drivers\demo.exe' = @('Demo'); 'drivers\fnirsi_dla.exe' = @('Dla') }
         & $Body $root $product $msi
         $passed = $true
     } finally {
@@ -152,7 +165,7 @@ Test-Case 'dialog install for me only into a chosen folder, finish, then uninsta
             if (-not $process.WaitForExit(60000)) { throw 'installer did not end after Finish' }
             Assert-Equal 0 $process.ExitCode 'installer exit code'
         } finally { if (-not $process.HasExited) { $process.Kill() } }
-        foreach ($relative in 'bitoscope_gui.exe', 'drivers\demo.exe') {
+        foreach ($relative in 'bitoscope_gui.exe', 'drivers\demo.exe', 'drivers\fnirsi_dla.exe') {
             if (-not (Test-Path -LiteralPath (Join-Path $chosen $relative))) { throw "no $relative in $chosen" }
         }
         if (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA "Programs\$($product.Folder)")) { throw 'default folder was used as well' }
@@ -160,6 +173,41 @@ Test-Case 'dialog install for me only into a chosen folder, finish, then uninsta
         Assert-Equal 0 $uninstall.ExitCode 'uninstall exit code'
         if (@(Get-ChildItem -LiteralPath $chosen -Recurse -File -ErrorAction SilentlyContinue).Count -gt 0) { throw "uninstall left files in $chosen" }
     }
+}
+
+function Install-WithDriverChoice([string[]]$ClearDrivers, [string[]]$Present, [string[]]$Absent) {
+    Use-UiSetup {
+        param($root, $product, $msi)
+        $chosen = Join-Path $root 'drivers chosen'
+        $process = Start-Setup $msi (Join-Path $root 'ui-drivers.log')
+        try {
+            Select-Control (Wait-Control $process 'RadioButton' 'Only for me (no administrator rights needed)')
+            Invoke-Control (Wait-Control $process 'Button' 'Next >')
+            Set-ControlValue (Wait-Control $process 'Edit' '') "$chosen\"
+            foreach ($title in 'Demo driver', 'FNIRSI DLA-16 driver') {
+                Assert-Equal 'On' (Get-ToggleState (Wait-Control $process 'CheckBox' $title)) "$title is chosen at start"
+            }
+            foreach ($title in $ClearDrivers) { Switch-Control (Wait-Control $process 'CheckBox' $title) }
+            foreach ($title in $ClearDrivers) { Assert-Equal 'Off' (Get-ToggleState (Wait-Control $process 'CheckBox' $title)) "$title after click" }
+            Invoke-Control (Wait-Control $process 'Button' 'Install')
+            Invoke-Control (Wait-Control $process 'Button' 'Finish' 120)
+            if (-not $process.WaitForExit(60000)) { throw 'installer did not end after Finish' }
+            Assert-Equal 0 $process.ExitCode 'installer exit code'
+        } finally { if (-not $process.HasExited) { $process.Kill() } }
+        foreach ($relative in $Present) { if (-not (Test-Path -LiteralPath (Join-Path $chosen $relative))) { throw "no $relative in $chosen" } }
+        foreach ($relative in $Absent) { if (Test-Path -LiteralPath (Join-Path $chosen $relative)) { throw "$relative was installed although its driver was cleared" } }
+        $uninstall = Invoke-ProgramAndWait @{ FilePath = "$env:SystemRoot\System32\msiexec.exe"; ArgumentList = (ConvertTo-MsiexecArguments @('/x', $msi, '/qn')) }
+        Assert-Equal 0 $uninstall.ExitCode 'uninstall exit code'
+        if (@(Get-ChildItem -LiteralPath $chosen -Recurse -File -ErrorAction SilentlyContinue).Count -gt 0) { throw "uninstall left files in $chosen" }
+    }
+}
+
+Test-Case 'dialog: clearing one driver leaves it out and installs the rest' {
+    Install-WithDriverChoice @('Demo driver') @('bitoscope_gui.exe', 'drivers\fnirsi_dla.exe') @('drivers\demo.exe')
+}
+
+Test-Case 'dialog: clearing every driver installs application alone, without drivers folder' {
+    Install-WithDriverChoice @('Demo driver', 'FNIRSI DLA-16 driver') @('bitoscope_gui.exe') @('drivers\demo.exe', 'drivers\fnirsi_dla.exe', 'drivers')
 }
 
 Test-Case 'dialog shows default folder of chosen scope and goes back' {

@@ -51,7 +51,7 @@ jobs:
           python3 - "$version" > notes.md <<'EOF'
           import json, sys
           manifest = json.load(open("manifest.json"))
-          print(f"Bitoscope {sys.argv[1]}: application, all decoders, demo driver, FNIRSI DLA-16 driver and sigrok bridge.")
+          print(f"Bitoscope {sys.argv[1]}: application, all decoders, demo driver, FNIRSI DLA-16 driver, sigrok bridge and FX2LA driver.")
           print()
           print("Built from:")
           print()
