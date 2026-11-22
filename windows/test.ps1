@@ -497,6 +497,25 @@ function Use-FeatureInstall([string[]]$ExtraProperties, [scriptblock]$Check) {
     }
 }
 
+Test-Case 'Invoke-Msiexec passes empty property so that driver is left out (install-test uses it)' {
+    $root = New-TempFolder
+    $product = New-TestFeatureProduct
+    $msi = Join-Path $root 'test.msi'
+    $folder = Join-Path $env:LOCALAPPDATA "Programs\$($product.Folder)"
+    try {
+        New-TestStage (Join-Path $root 'stage')
+        New-MsiPackage -Stage (Join-Path $root 'stage') -OutputPath $msi -WorkFolder (Join-Path $root 'work') -Product $product -FileFeatures $script:TestFileFeatures
+        Invoke-Msiexec @('/i', $msi, '/qn', 'MSIINSTALLPERUSER=1', 'INSTALL_DEMO=') 'install without demo'
+        if (Test-Path -LiteralPath (Join-Path $folder 'drivers\demo.exe')) { throw 'demo.exe was installed although INSTALL_DEMO was empty' }
+        if (-not (Test-Path -LiteralPath (Join-Path $folder 'bitoscope_gui.exe'))) { throw 'application was not installed' }
+        Invoke-Msiexec @('/x', $msi, '/qn') 'uninstall'
+    } finally {
+        [void](Invoke-TestMsiexec @('/x', $product.ProductCode, '/qn'))
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'msi installs every driver when no property is given' {
     Use-FeatureInstall @() {
         param($files)

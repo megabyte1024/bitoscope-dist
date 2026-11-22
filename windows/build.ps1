@@ -282,11 +282,6 @@ function Test-Installed([string]$Stage, [string]$Folder, [string]$Checker, [stri
     Test-Distribution $Folder $Checker $Dumpbin (Join-Path $Work 'home') -NoDrivers:$NoDrivers
 }
 
-function Invoke-Msiexec([string[]]$Arguments, [string]$What) {
-    $process = Invoke-ProgramAndWait @{ FilePath = "$env:SystemRoot\System32\msiexec.exe"; ArgumentList = (ConvertTo-ArgumentText $Arguments) }
-    if ($process.ExitCode -ne 0) { throw "$What failed: msiexec exited $($process.ExitCode)" }
-}
-
 function Invoke-InstallTest($Data) {
     $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {

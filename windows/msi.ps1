@@ -473,3 +473,8 @@ function Invoke-MsiQuery([string]$Package, [string]$Query) {
         [void][BitoscopeDist.MsiNative]::MsiCloseHandle($database)
     }
 }
+
+function Invoke-Msiexec([string[]]$Arguments, [string]$What) {
+    $process = Invoke-ProgramAndWait @{ FilePath = "$env:SystemRoot\System32\msiexec.exe"; ArgumentList = (ConvertTo-MsiexecArguments $Arguments) }
+    if ($process.ExitCode -ne 0) { throw "$What failed: msiexec exited $($process.ExitCode)" }
+}
